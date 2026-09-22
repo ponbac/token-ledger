@@ -26,10 +26,14 @@ supported source by omitting `--provider`.
 
 ```sh
 bun run dev report --since 2026-09-01 --until 2026-09-30
-bun run dev report --provider claude --format json > report.json
+bun run dev report --provider codex --json > report.json
 bun run dev report --provider codex --format csv > report.csv
 bun run dev report --provider codex --source ~/history/session.jsonl --project "Client A"
 ```
+
+`--json` is a shortcut for `--format json` and takes precedence over `--format`.
+JSON stdout contains only the structured report, including coverage and pricing
+metadata; diagnostics go to stderr. Unknown costs are `null`, not zero.
 
 Build a standalone Node executable (Node 24 or newer):
 

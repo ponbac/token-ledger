@@ -7,8 +7,9 @@
     "token-ledger": "./dist/main.js"
   },
   "dependencies": {
-    "@token-ledger/core": "workspace:*",
     "@effect/platform-node": "4.0.0-rc.117",
+    "@token-ledger/core": "workspace:*",
+    "cli-table3": "^0.6.5",
     "effect": "4.0.0-rc.117"
   }
 }
