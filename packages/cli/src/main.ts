@@ -52,6 +52,12 @@ const report = Command.make(
       Flag.withDescription("JSON config; otherwise reads ./token-ledger.json when present"),
     ),
     format: Flag.Literals("format", ["table", "json", "csv"]).pipe(Flag.withDefault("table")),
+    json: Flag.Boolean("json").pipe(
+      Flag.withDefault(false),
+      Flag.withDescription(
+        "Emit structured JSON to stdout (overrides --format); diagnostics use stderr",
+      ),
+    ),
     offline: Flag.Boolean("offline").pipe(
       Flag.withDefault(false),
       Flag.withDescription("Use only cached and configured prices"),
@@ -184,10 +190,16 @@ const report = Command.make(
     const ledger = yield* Ledger;
     const result = yield* ledger.report(request);
 
-    const output = Match.value(flags.format).pipe(
+    const output = Match.value(flags.json ? "json" : flags.format).pipe(
       Match.when("json", () => JSON.stringify(result, null, 2)),
       Match.when("csv", () => csv(result)),
-      Match.when("table", () => table(result)),
+      Match.when("table", () =>
+        table(
+          result,
+          process.stdout.columns ?? 120,
+          process.stdout.isTTY && process.stdout.hasColors(),
+        ),
+      ),
       Match.exhaustive,
     );
 

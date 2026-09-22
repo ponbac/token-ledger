@@ -84,6 +84,11 @@ await test("built CLI exports reports, protects CSV cells, and exposes incomplet
     assert.equal(report.rows[0]?.tokens.cacheRead, 60);
     assert.equal(report.rows[0]?.estimatedCostUsd, 0.000292);
 
+    const shortcut = run(["--json", "--format", "csv", "--project", "Client A", "--strict"]);
+
+    assert.equal(shortcut.status, 0, shortcut.stderr);
+    assert.deepEqual(decodeReport(shortcut.stdout), report);
+
     const csv = run(["--format", "csv", "--project", "=formula"]);
 
     assert.equal(csv.status, 0, csv.stderr);
@@ -92,7 +97,7 @@ await test("built CLI exports reports, protects CSV cells, and exposes incomplet
 
     writeFileSync(configuration, "{}");
 
-    const incomplete = run(["--format", "json", "--strict"]);
+    const incomplete = run(["--json", "--strict"]);
 
     assert.equal(incomplete.status, 2);
     assert.equal(decodeReport(incomplete.stdout).rows[0]?.estimatedCostUsd, null);
