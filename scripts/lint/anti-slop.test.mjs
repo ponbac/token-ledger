@@ -68,6 +68,13 @@ await test("enables all 18 generic and five Effect rules", () => {
   assert.equal(effect.length, 5);
 
   for (const [, severity] of [...generic, ...effect]) assert.equal(severity, "error");
+
+  for (const override of config.overrides) {
+    for (const [rule, severity] of Object.entries(override.rules)) {
+      if (rule.startsWith("anti-slop/") || rule.startsWith("anti-slop-effect/"))
+        assert.equal(severity, "error", `${rule} must remain enabled in overrides`);
+    }
+  }
 });
 
 await test("generic rules reject lost type evidence and module mocking", () => {
@@ -114,11 +121,16 @@ await test("all five Effect rules reject their production targets", () => {
   }
 });
 
-await test("only tests may construct raw tagged fixtures", () => {
+await test("manual tagged construction is rejected in production and test code", () => {
   const source = 'export const value = { _tag: "Ready" };\n';
 
   assert.equal(lint(source).status, 1);
-  assert.equal(lint(source, "fixture.test.ts").status, 0);
+
+  for (const name of ["fixture.test.ts", "fixture.spec.ts"]) {
+    const result = lint(source, name);
+    assert.equal(result.status, 1);
+    assert.match(result.output, /anti-slop-effect\(no-manual-tagged-construction\)/);
+  }
 });
 
 await test("long alias chains remain fast and generic shadowing remains valid", () => {

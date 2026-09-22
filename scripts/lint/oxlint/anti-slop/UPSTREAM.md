@@ -7,8 +7,8 @@ Copied upstream `src/` excluding test files, plus the MIT `LICENSE`.
 The generic plugin enables all eighteen rules. Its nested ESLint Stylistic
 vendor directory retains its own license and provenance.
 The Effect plugin is copied from the same revision and all five rules are
-registered as errors. Only manual tagged construction is exempt in test files
-and test-helper directories. Token Ledger adopts these same policies.
+registered as errors. Token Ledger enables all rules in production and test code,
+without Spindexer's test exemption for manual tagged construction.
 
 ## Local patches
 
@@ -35,7 +35,7 @@ Keep the alias, shadowing, and long-chain regression fixtures when updating.
 Remove this patch once upstream handles the long-chain fixture within the
 existing timeout. Preserve the adjacent license on future updates.
 
-Token Ledger checks rule registration, representative rejections, test exemptions,
+Token Ledger checks rule registration, representative rejections, enforcement in tests,
 and local patch regressions in `../../anti-slop.test.mjs`. Spacing-only adoption changes add
 blank lines throughout the configured lint scopes; fixture source strings
 also follow this policy. All other generic source matches the pinned upstream.

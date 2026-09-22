@@ -191,8 +191,8 @@ bun run lint:fix
   through a local backend.
 - Effect and platform packages are pinned to `4.0.0-rc.117`.
 - Oxlint `1.80.0` with type-aware checks, Oxfmt `0.66.0`, and all 18 generic plus
-  five Effect anti-slop policies gate CI. Only raw tagged construction is exempt in
-  tests. TypeScript owns duplicate declaration checking for schema/type pairs.
+  five Effect anti-slop policies gate CI, including test code, without exemptions.
+  TypeScript owns duplicate declaration checking for schema/type pairs.
 - Vendored anti-slop rules are pinned to upstream `c44ef22`; `main` was verified at
   that revision on 2026-09-22. Provenance, local patches, and licenses live beside
   the rules. The separate experimental Effect TSGo bridge is not installed.
