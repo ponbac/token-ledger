@@ -12,7 +12,10 @@ reports; an Effect CLI handles configuration, presentation, and process lifecycl
 - Keep prompts, responses, credentials, and source code out of reports and fixtures.
 - Costs are API-equivalent estimates, not subscription bills. Missing data is not zero.
 - Use synthetic fixtures; never commit local provider histories or generated personal reports.
-- Run `bun run typecheck`, `bun run test`, `bun run format:check`, and `bun run build`.
+- Run `bun run check` (Oxlint, Oxfmt, typecheck, tooling tests, core tests, build).
+- Oxlint is the gating linter and Oxfmt is the formatter. All 18 generic and five
+  Effect anti-slop rules are enabled, with only tagged construction exempt in tests.
+  Vendored rules retain their upstream licenses and Spindexer compatibility patches.
 - Do not create a UI, daemon, or plugin framework without a concrete need.
 
 ## Reference repositories

@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "bin": { "token-ledger": "./dist/main.js" },
+  "bin": {
+    "token-ledger": "./dist/main.js"
+  },
   "dependencies": {
     "@token-ledger/core": "workspace:*",
     "@effect/platform-node": "4.0.0-rc.117",

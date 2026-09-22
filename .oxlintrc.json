@@ -1,0 +1,118 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "unicorn", "oxc", "import", "promise", "node", "vitest"],
+  "jsPlugins": [
+    "./scripts/lint/oxlint/anti-slop/index.ts",
+    "./scripts/lint/oxlint/anti-slop/effect/index.ts"
+  ],
+  "env": {
+    "node": true
+  },
+  "options": {
+    "reportUnusedDisableDirectives": "error",
+    "typeAware": true
+  },
+  "categories": {
+    "correctness": "error"
+  },
+  "ignorePatterns": [
+    ".reference/**",
+    "**/node_modules/**",
+    "**/dist/**",
+    "coverage/**",
+    "scripts/lint/oxlint/anti-slop/**"
+  ],
+  "rules": {
+    "eslint/array-callback-return": "error",
+    "eslint/default-case-last": "error",
+    "eslint/eqeqeq": ["error", "smart"],
+    "eslint/no-case-declarations": "error",
+    "eslint/no-fallthrough": "error",
+    "eslint/no-proto": "error",
+    "eslint/no-prototype-builtins": "error",
+    "eslint/no-redeclare": "error",
+    "eslint/no-script-url": "error",
+    "eslint/no-self-compare": "error",
+    "eslint/no-unused-vars": "error",
+    "eslint/radix": "error",
+    "typescript/ban-ts-comment": "error",
+    "typescript/consistent-type-imports": "error",
+    "typescript/consistent-type-exports": "error",
+    "typescript/no-empty-object-type": [
+      "error",
+      {
+        "allowInterfaces": "with-single-extends"
+      }
+    ],
+    "typescript/no-explicit-any": "error",
+    "typescript/no-floating-promises": "error",
+    "typescript/no-non-null-assertion": "error",
+    "typescript/no-redundant-type-constituents": "off",
+    "typescript/no-unnecessary-type-constraint": "error",
+    "typescript/no-unsafe-argument": "error",
+    "typescript/no-unsafe-function-type": "error",
+    "typescript/prefer-literal-enum-member": "error",
+    "typescript/restrict-template-expressions": "error",
+    "typescript/triple-slash-reference": "off",
+    "oxc/no-const-enum": "error",
+    "import/no-duplicates": "error",
+    "import/no-cycle": "error",
+    "import/no-self-import": "error",
+    "promise/no-return-in-finally": "error",
+    "promise/prefer-await-to-then": "off",
+    "unicorn/no-array-reverse": "error",
+    "unicorn/no-array-sort": "error",
+    "unicorn/no-instanceof-array": "error",
+    "unicorn/prefer-node-protocol": "error",
+    "anti-slop/no-array-filter-map": "error",
+    "anti-slop/no-reduce-accumulator-copy": "error",
+    "anti-slop/require-readable-spacing": "error",
+    "anti-slop/no-chained-type-assertions": "error",
+    "anti-slop/no-conditional-empty-object-spread": "error",
+    "anti-slop/no-known-value-widening": "error",
+    "anti-slop/no-module-mocking": "error",
+    "anti-slop/no-object-parameters": "error",
+    "anti-slop/no-reflect-apply": "error",
+    "anti-slop/no-reflect-get": "error",
+    "anti-slop/no-runtime-typeof": "error",
+    "anti-slop/no-shape-in-symbol-names": "error",
+    "anti-slop/no-unknown-parameters": "error",
+    "anti-slop/no-unknown-returns": "error",
+    "anti-slop/no-unknown-type-aliases": "error",
+    "anti-slop/no-unsafe-dictionary-type": "error",
+    "anti-slop/no-widen-then-assert": "error",
+    "anti-slop/require-safety-comment-for-type-assertion": "error",
+    "anti-slop-effect/no-manual-effect-error-tag": "error",
+    "anti-slop-effect/prefer-effect-match": "error",
+    "anti-slop-effect/no-manual-tag-comparison": "error",
+    "anti-slop-effect/no-manual-tagged-construction": "error",
+    "anti-slop-effect/no-service-constructor-imports": "error",
+    "eslint/no-restricted-imports": [
+      "error",
+      {
+        "paths": [
+          {
+            "name": "ts-pattern",
+            "message": "Use Effect Match for exhaustive matching across backend and frontend code."
+          }
+        ]
+      }
+    ],
+    "vitest/no-standalone-expect": "off"
+  },
+  "overrides": [
+    {
+      "files": ["**/*.test.*", "**/*.spec.*", "**/tests/**", "**/test/**", "**/test-fixtures/**"],
+      "rules": {
+        "anti-slop-effect/no-manual-tagged-construction": "off",
+        "eslint/require-yield": "off"
+      }
+    },
+    {
+      "files": ["**/*.ts", "**/*.tsx"],
+      "rules": {
+        "eslint/no-redeclare": "off"
+      }
+    }
+  ]
+}

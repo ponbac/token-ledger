@@ -10,7 +10,13 @@
     "skipLibCheck": true,
     "noEmit": true,
     "types": ["node"],
-    "paths": { "@token-ledger/core/*": ["./packages/core/src/*"] }
+    "paths": {
+      "@token-ledger/core/*": ["./packages/core/src/*"]
+    },
+    "allowImportingTsExtensions": true,
+    "allowJs": true,
+    "checkJs": true,
+    "resolveJsonModule": true
   },
-  "include": ["packages/**/*.ts", "vitest.config.ts"]
+  "include": ["packages/**/*.ts", "vitest.config.ts", "scripts/**/*.mjs"]
 }

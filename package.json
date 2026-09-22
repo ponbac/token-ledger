@@ -3,21 +3,30 @@
   "private": true,
   "type": "module",
   "packageManager": "bun@1.4.0",
-  "workspaces": ["packages/*"],
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
     "dev": "bun packages/cli/src/main.ts",
     "build": "bun build packages/cli/src/main.ts --target=node --outfile=packages/cli/dist/main.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "format": "prettier --write packages scripts '*.json' '*.md' .github .vscode",
-    "format:check": "prettier --check packages scripts '*.json' '*.md' .github .vscode",
-    "reference:update": "node scripts/update-references.mjs"
+    "reference:update": "node scripts/update-references.mjs",
+    "lint": "oxlint --config .oxlintrc.json packages scripts vitest.config.ts",
+    "lint:fix": "bun run lint --fix",
+    "fmt": "oxfmt --disable-nested-config --write .",
+    "fmt:check": "oxfmt --disable-nested-config --check .",
+    "test:tooling": "node --test scripts/lint/anti-slop.test.mjs",
+    "check": "bun run lint && bun run fmt:check && bun run typecheck && bun run test:tooling && bun run test && bun run build"
   },
   "devDependencies": {
     "@effect/vitest": "4.0.0-rc.117",
     "@types/node": "^24.0.0",
-    "prettier": "^3.6.2",
     "typescript": "^5.9.3",
-    "vitest": "^3.2.4"
+    "vitest": "^5.0.1",
+    "oxlint": "1.80.0",
+    "@oxlint/plugins": "1.80.0",
+    "oxlint-tsgolint": "7.0.2001",
+    "oxfmt": "0.66.0"
   }
 }
