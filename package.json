@@ -17,16 +17,19 @@
     "fmt": "oxfmt --disable-nested-config --write .",
     "fmt:check": "oxfmt --disable-nested-config --check .",
     "test:tooling": "node --test scripts/lint/anti-slop.test.mjs",
-    "check": "bun run lint && bun run fmt:check && bun run typecheck && bun run test:tooling && bun run test && bun run build"
+    "check": "bun run lint && bun run fmt:check && bun run typecheck && bun run test:tooling && bun run test && bun run build && bun run test:cli",
+    "test:cli": "node --test scripts/cli.test.mjs"
   },
   "devDependencies": {
+    "@effect/platform-node": "4.0.0-rc.117",
     "@effect/vitest": "4.0.0-rc.117",
-    "@types/node": "^24.0.0",
-    "typescript": "^5.9.3",
-    "vitest": "^5.0.1",
-    "oxlint": "1.80.0",
     "@oxlint/plugins": "1.80.0",
+    "@types/node": "^24.0.0",
+    "effect": "4.0.0-rc.117",
+    "oxfmt": "0.66.0",
+    "oxlint": "1.80.0",
     "oxlint-tsgolint": "7.0.2001",
-    "oxfmt": "0.66.0"
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.1"
   }
 }

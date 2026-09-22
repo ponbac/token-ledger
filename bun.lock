@@ -5,9 +5,11 @@
     "": {
       "name": "token-ledger-workspace",
       "devDependencies": {
+        "@effect/platform-node": "4.0.0-rc.117",
         "@effect/vitest": "4.0.0-rc.117",
         "@oxlint/plugins": "1.80.0",
         "@types/node": "^24.0.0",
+        "effect": "4.0.0-rc.117",
         "oxfmt": "0.66.0",
         "oxlint": "1.80.0",
         "oxlint-tsgolint": "7.0.2001",

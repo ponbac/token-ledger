@@ -1,1 +1,2 @@
 .reference/** linguist-vendored
+scripts/lint/oxlint/anti-slop/** linguist-vendored
