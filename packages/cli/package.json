@@ -10,6 +10,7 @@
     "@effect/platform-node": "4.0.0-rc.117",
     "@token-ledger/core": "workspace:*",
     "cli-table3": "^0.6.5",
-    "effect": "4.0.0-rc.117"
+    "effect": "4.0.0-rc.117",
+    "wrap-ansi": "^10.0.2"
   }
 }

@@ -193,7 +193,13 @@ const report = Command.make(
     const output = Match.value(flags.json ? "json" : flags.format).pipe(
       Match.when("json", () => JSON.stringify(result, null, 2)),
       Match.when("csv", () => csv(result)),
-      Match.when("table", () => table(result, process.stdout.columns ?? 120)),
+      Match.when("table", () =>
+        table(
+          result,
+          process.stdout.columns ?? 120,
+          process.stdout.isTTY && process.stdout.hasColors(),
+        ),
+      ),
       Match.exhaustive,
     );
 

@@ -1,5 +1,8 @@
+import { styleText } from "node:util";
+
 import { addTokens, totalTokens, zeroTokens, type UsageReport } from "@token-ledger/core/model";
 import Table from "cli-table3";
+import wrapAnsi from "wrap-ansi";
 
 /** CSV cells are quoted and spreadsheet formula prefixes are escaped before export. */
 function csvCell(value: string | number | null): string {
@@ -51,8 +54,11 @@ function terminalText(value: string): string {
   return value.replace(/[\x00-\x1f\x7f-\x9f]/g, " ");
 }
 
-/** Per-project totals fitted to terminal columns, with stacked rows on narrow terminals and sanitized identifiers. */
-export function table(report: UsageReport, columns = 120): string {
+/** Per-project totals fitted to terminal columns, sorted by known API cost, with optional styling and sanitized identifiers. */
+export function table(report: UsageReport, columns = 120, colorful = false): string {
+  const paint = (format: Parameters<typeof styleText>[0], value: string) =>
+    colorful ? styleText(format, value, { validateStream: false }) : value;
+
   const projects = new Map<string, { tokens: typeof zeroTokens; cost: number; unpriced: number }>();
 
   for (const row of report.rows) {
@@ -75,7 +81,12 @@ export function table(report: UsageReport, columns = 120): string {
   let unpriced = 0;
   const rows: string[][] = [];
 
-  for (const [project, total] of projects) {
+  const ranked = [...projects].toSorted(
+    ([leftProject, left], [rightProject, right]) =>
+      right.cost - left.cost || leftProject.localeCompare(rightProject),
+  );
+
+  for (const [project, total] of ranked) {
     rows.push([
       terminalText(project),
       number.format(total.tokens.input),
@@ -108,35 +119,71 @@ export function table(report: UsageReport, columns = 120): string {
   const projectWidth = columns - numericWidths.reduce((sum, width) => sum + width, 0) - 7;
   const narrow = projectWidth < 22;
 
+  const colWidths = narrow
+    ? [16, Math.max(4, columns - 19)]
+    : [Math.min(50, projectWidth), ...numericWidths];
+
   const output = new Table({
-    head: narrow ? [] : headings,
-    colWidths: narrow
-      ? [16, Math.max(4, columns - 19)]
-      : [Math.min(50, projectWidth), ...numericWidths],
+    head: narrow ? [] : headings.map((heading) => paint(["bold", "cyan"], heading)),
+    colWidths,
     colAligns: narrow ? ["left", "right"] : ["left", "right", "right", "right", "right", "right"],
-    wordWrap: true,
-    wrapOnWordBoundary: false,
+    wordWrap: false,
     style: { head: [], border: [] },
   });
 
-  for (const row of rows) {
+  for (const [index, row] of rows.entries()) {
+    const styled = row.map((value, column) => {
+      const width = narrow
+        ? column === 0
+          ? columns - 4
+          : columns - 21
+        : (colWidths[column] ?? 4) - 2;
+
+      // cli-table3's hard wrapping splits ANSI sequences; wrap before styling instead.
+      const cell = wrapAnsi(value, Math.max(2, width), {
+        hard: true,
+        wordWrap: false,
+        trim: false,
+      });
+
+      if (index === rows.length - 1) return paint(["bold", "magenta"], cell);
+
+      if (column === 0) return paint("cyan", cell);
+
+      if (column === headings.length - 1)
+        return paint(value.includes("unknown") ? "yellow" : "green", cell);
+
+      return cell === "0" ? paint("dim", cell) : cell;
+    });
+
     if (narrow) {
-      output.push([{ content: row[0] ?? "", colSpan: 2, hAlign: "left" }]);
+      output.push([{ content: styled[0] ?? "", colSpan: 2, hAlign: "left" }]);
 
       for (const [i, heading] of headings.slice(1).entries()) {
-        output.push([heading, row[i + 1] ?? ""]);
+        output.push([paint("cyan", heading), styled[i + 1] ?? ""]);
       }
     } else {
-      output.push(row);
+      output.push(styled);
     }
   }
 
   return [
-    `Token Ledger · ${report.since} through ${report.until} (UTC)`,
+    `${paint(["bold", "cyan"], colorful ? "⚡ Token Ledger" : "Token Ledger")} · ${paint("dim", `${report.since} through ${report.until} (UTC)`)}`,
     "",
     output.toString(),
     "",
-    `${number.format(totalTokens(allTokens))} observed tokens · ${number.format(projects.size)} ${projects.size === 1 ? "project" : "projects"}`,
-    "USD API-equivalent estimates; not your subscription bill.",
+    paint(
+      "bold",
+      `${colorful ? "📊 " : ""}${number.format(totalTokens(allTokens))} observed tokens · ${number.format(projects.size)} ${projects.size === 1 ? "project" : "projects"}`,
+    ),
+    ...(unpriced > 0
+      ? [
+          paint(
+            "yellow",
+            "Incomplete pricing: sorted by known API subtotal; unknown costs are additional.",
+          ),
+        ]
+      : []),
+    paint("dim", "USD API-equivalent estimates; not your subscription bill."),
   ].join("\n");
 }
