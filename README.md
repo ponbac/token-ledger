@@ -222,6 +222,8 @@ Keep developer identity alongside exported reports when combining them across a 
   burst. The report explicitly marks affected coverage as partial.
 - A truncated or malformed JSONL line is skipped and counted. No prompts are printed
   in diagnostics. An active session can change during a scan; this is not a transactional snapshot.
+- Coverage diagnostics describe all scanned files, including events outside the selected
+  date window. Codex updates with no usage payload are ignored, not counted as lost usage.
 - Default project inference uses the current local Git metadata when the transcript
   lacks a remote. Explicit mappings make attribution more stable across machines.
 - A session that works across projects still needs an explicit allocation policy;

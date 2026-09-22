@@ -43,10 +43,12 @@ const Counts = Schema.Struct({
 
 const Usage = Schema.Struct({
   type: Schema.Literal("token_count"),
-  info: Schema.Struct({
-    last_token_usage: Counts,
-    total_token_usage: Schema.optionalKey(Counts),
-  }),
+  info: Schema.NullOr(
+    Schema.Struct({
+      last_token_usage: Counts,
+      total_token_usage: Schema.optionalKey(Counts),
+    }),
+  ),
 });
 
 /** Reads Codex rollout metadata and token events, preserving per-turn working directories. */
@@ -105,6 +107,9 @@ export function codexParser(file: string): TranscriptParser {
       const usage = Option.getOrNull(Schema.decodeUnknownOption(Usage)(event.payload));
 
       if (usage === null) return line.includes('"token_count"') ? skipped : empty;
+
+      // Codex also emits token_count events without usage (for example, rate-limit updates).
+      if (usage.info === null) return empty;
       const ms = timestamp(event.timestamp);
 
       if (ms === null) return skipped;

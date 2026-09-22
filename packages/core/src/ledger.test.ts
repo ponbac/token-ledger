@@ -106,6 +106,50 @@ describe("Ledger reports through the public interface", () => {
       }).pipe(Effect.provide(runtime)),
   );
 
+  it.effect("ignores empty Codex usage updates without losing counts or hiding invalid usage", () =>
+    Effect.gen(function* () {
+      const { write } = yield* fixture();
+
+      const emptyUsage = JSON.stringify({
+        type: "event_msg",
+        timestamp: "2026-09-22T09:01:30Z",
+        payload: { type: "token_count", info: null },
+      });
+
+      const file = yield* write("empty-usage.jsonl", [
+        JSON.stringify({ type: "session_meta", payload: { id: "empty-updates" } }),
+        JSON.stringify({ type: "turn_context", payload: { model: "test-model" } }),
+        emptyUsage,
+        codexUsage("09:01:00"),
+        emptyUsage,
+        codexUsage("09:01:00"),
+        codexUsage("09:02:00", 100, 20, 200),
+      ]);
+
+      const ledger = yield* Ledger;
+      const report = yield* ledger.report(request([{ provider: "codex", path: file }]));
+      assert.strictEqual(report.coverage[0]?.status, "ok");
+      assert.strictEqual(report.coverage[0]?.skippedRecords, 0);
+      assert.strictEqual(report.rows[0]?.records, 2);
+      assert.strictEqual(
+        totalTokens(report.rows[0]?.tokens ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }),
+        240,
+      );
+
+      const invalid = yield* write("invalid-usage.jsonl", [
+        JSON.stringify({
+          type: "event_msg",
+          timestamp: "2026-09-22T09:03:00Z",
+          payload: { type: "token_count", info: {} },
+        }),
+      ]);
+
+      const partial = yield* ledger.report(request([{ provider: "codex", path: invalid }]));
+      assert.strictEqual(partial.coverage[0]?.status, "partial");
+      assert.strictEqual(partial.coverage[0]?.skippedRecords, 1);
+    }).pipe(Effect.provide(runtime)),
+  );
+
   it.effect("excludes copied fork bursts and retains later model switches", () =>
     Effect.gen(function* () {
       const { write } = yield* fixture();
