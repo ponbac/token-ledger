@@ -131,6 +131,15 @@ export function table(report: UsageReport, columns = 120, colorful = false): str
     style: { head: [], border: [] },
   });
 
+  const projectColors = [
+    "cyan",
+    "blueBright",
+    "magenta",
+    "yellow",
+    "green",
+    "cyanBright",
+  ] satisfies readonly Parameters<typeof styleText>[0][];
+
   for (const [index, row] of rows.entries()) {
     const styled = row.map((value, column) => {
       const width = narrow
@@ -148,7 +157,7 @@ export function table(report: UsageReport, columns = 120, colorful = false): str
 
       if (index === rows.length - 1) return paint(["bold", "magenta"], cell);
 
-      if (column === 0) return paint("cyan", cell);
+      if (column === 0) return paint(projectColors[index % projectColors.length] ?? "cyan", cell);
 
       if (column === headings.length - 1)
         return paint(value.includes("unknown") ? "yellow" : "green", cell);
