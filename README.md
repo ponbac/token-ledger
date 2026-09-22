@@ -47,6 +47,26 @@ node packages/cli/dist/main.js report --provider codex
 This repository is not yet published to npm. Run `--help` on the executable or any
 subcommand for options. Effect CLI also provides completion scripts and `--wizard`.
 
+### Windows
+
+The CLI is intended to run on Windows with Bun, or with Node.js 24+ for the built
+executable, but Windows compatibility has not yet been verified. With Git and Bun
+installed, run these commands in PowerShell:
+
+```powershell
+git clone https://github.com/ponbac/token-ledger.git
+cd token-ledger
+bun install --frozen-lockfile
+bun run dev report
+```
+
+To build with Bun and run with Node.js:
+
+```powershell
+bun run build
+node packages/cli/dist/main.js report
+```
+
 ## Collection coverage
 
 | Provider    | Default input                                          | Coverage                                                                     |
@@ -68,6 +88,31 @@ mkdir -p ~/.copilot/otel
 export COPILOT_OTEL_FILE_EXPORTER_PATH="$HOME/.copilot/otel/usage.jsonl"
 copilot
 ```
+
+On Windows, use PowerShell:
+
+```powershell
+New-Item -ItemType Directory -Force "$HOME\.copilot\otel"
+$env:COPILOT_OTEL_FILE_EXPORTER_PATH = "$HOME\.copilot\otel\usage.jsonl"
+copilot
+```
+
+Setting the file path automatically enables telemetry export to that local file;
+no separate toggle or telemetry server is needed. Prompt and response content
+capture is off by default.
+
+The commands above set the variable for the current shell. To persist it for future
+Windows terminals, also run:
+
+```powershell
+[Environment]::SetEnvironmentVariable(
+  "COPILOT_OTEL_FILE_EXPORTER_PATH",
+  "$HOME\.copilot\otel\usage.jsonl",
+  "User"
+)
+```
+
+On Bash or Zsh, add the `export` line to your shell startup file to persist it.
 
 Then run `bun run dev report --provider copilot`. This does not backfill earlier
 sessions. Only request spans are counted, so parent summaries and metric exports
