@@ -1,0 +1,6 @@
+{
+  "typescript.preferences.autoImportFileExcludePatterns": [".reference/**"],
+  "javascript.preferences.autoImportFileExcludePatterns": [".reference/**"],
+  "files.watcherExclude": { "**/.reference/**": true },
+  "search.exclude": { "**/.reference": true }
+}
