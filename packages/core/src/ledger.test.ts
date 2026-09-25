@@ -279,6 +279,63 @@ describe("Ledger reports through the public interface", () => {
     }).pipe(Effect.provide(runtime)),
   );
 
+  it.effect("attributes Copilot requests from later parent spans without crossing traces", () =>
+    Effect.gen(function* () {
+      const { write } = yield* fixture();
+      const endTime = [Date.parse("2026-09-22T10:00:00Z") / 1000, 0];
+
+      const chat = (traceId: string, parentSpanId: string) =>
+        JSON.stringify({
+          type: "span",
+          traceId,
+          spanId: "chat",
+          parentSpanId,
+          endTime,
+          attributes: {
+            "gen_ai.operation.name": "chat",
+            "gen_ai.response.model": "test-model",
+            "gen_ai.usage.input_tokens": 100,
+            "gen_ai.usage.output_tokens": 20,
+          },
+        });
+
+      const parent = (traceId: string, spanId: string, repository: string) =>
+        JSON.stringify({
+          type: "span",
+          traceId,
+          spanId,
+          endTime,
+          attributes: {
+            "gen_ai.operation.name": "invoke_agent",
+            "github.copilot.git.repository": repository,
+            "gen_ai.usage.input_tokens": 100,
+            "gen_ai.usage.output_tokens": 20,
+          },
+        });
+
+      const file = yield* write("copilot-parent.jsonl", [
+        chat("trace-a", "parent-a"),
+        chat("trace-b", "parent-b"),
+        chat("trace-c", "missing-parent"),
+        parent("trace-b", "parent-b", "acme/beta"),
+        parent("trace-a", "parent-a", "acme/alpha"),
+      ]);
+
+      const ledger = yield* Ledger;
+      const report = yield* ledger.report(request([{ provider: "copilot", path: file }]));
+
+      assert.deepStrictEqual(
+        report.rows.map((row) => [row.project, row.records]),
+        [
+          ["acme/alpha", 1],
+          ["acme/beta", 1],
+          ["Unassigned", 1],
+        ],
+      );
+      assert.strictEqual(report.coverage[0]?.status, "ok");
+    }).pipe(Effect.provide(runtime)),
+  );
+
   it.effect("groups Git worktrees and honors most-specific path mappings", () =>
     Effect.gen(function* () {
       const { write, root, path } = yield* fixture();

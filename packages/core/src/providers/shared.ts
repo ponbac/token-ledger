@@ -12,6 +12,7 @@ export interface ParseResult {
 /** Mutable state is scoped to one transcript, never shared across scans. */
 export interface TranscriptParser {
   readonly parse: (line: string, lineNumber: number) => ParseResult;
+  readonly finish?: () => ParseResult;
 }
 
 /** An unrelated or already-counted provider event. */

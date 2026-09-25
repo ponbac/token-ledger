@@ -161,8 +161,10 @@ their common Git directory. Relative config paths resolve from the config file;
 `~/` resolves from the current developer's home. Directory mappings respect path
 boundaries, so `/work/app` never matches `/work/application`.
 
-Grok logs currently lack project metadata in the usage parser. Copilot exports may
-also omit repository attributes. Use a fixed source project for those histories:
+Grok logs currently lack project metadata in the usage parser. Copilot CLI can put
+repository metadata on a parent agent span rather than the counted request span;
+Token Ledger associates the two. If an export has no repository metadata, use a
+fixed source project:
 
 ```json
 {

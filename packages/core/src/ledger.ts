@@ -27,6 +27,7 @@ import { claudeParser } from "./providers/claude.ts";
 import { codexParser } from "./providers/codex.ts";
 import { copilotParser } from "./providers/copilot.ts";
 import { grokParser } from "./providers/grok.ts";
+import type { ParseResult } from "./providers/shared.ts";
 
 /** Invalid report windows or paths, with no provider payloads in the error. */
 export class InvalidRequest extends Schema.TaggedError<InvalidRequest>()("InvalidRequest", {
@@ -114,6 +115,54 @@ export class Ledger extends Context.Service<
 
             let lineNumber = 0;
             files++;
+
+            const accept = Effect.fn("Ledger.acceptRecords")(function* (result: ParseResult) {
+              malformedLines += result.malformed;
+              skippedRecords += result.skipped;
+
+              for (const warning of result.warnings) warnings.add(warning);
+
+              for (const record of result.records) {
+                if (
+                  record.timestamp < since ||
+                  record.timestamp >= until ||
+                  totalTokens(record.tokens) === 0
+                )
+                  continue;
+                const id = `${record.provider}:${record.id}`;
+
+                if (seen.has(id)) {
+                  duplicates++;
+                  continue;
+                }
+
+                seen.add(id);
+                const project = yield* resolveProject(record, source.project);
+                const day = new Date(record.timestamp).toISOString().slice(0, 10);
+                const key = JSON.stringify([project, day, record.provider, record.model]);
+                const previous = rows.get(key);
+
+                const price = lookupPrice(request.pricing, record.model);
+                const cost = priceTokens(record.tokens, price);
+
+                const unpricedRecords = (previous?.unpricedRecords ?? 0) + (cost === null ? 1 : 0);
+
+                const pricedCostUsd = (previous?.pricedCostUsd ?? 0) + (cost ?? 0);
+                rows.set(key, {
+                  project,
+                  day,
+                  provider: record.provider,
+                  model: record.model,
+                  pricePerMillion: price ?? null,
+                  tokens: addTokens(previous?.tokens ?? zeroTokens, record.tokens),
+                  records: (previous?.records ?? 0) + 1,
+                  estimatedCostUsd: unpricedRecords > 0 ? null : pricedCostUsd,
+                  pricedCostUsd,
+                  unpricedRecords,
+                });
+              }
+            });
+
             yield* fs.stream(canonical).pipe(
               Stream.decodeText,
               Stream.splitLines,
@@ -122,55 +171,12 @@ export class Ledger extends Context.Service<
                   lineNumber++;
 
                   if (!line.trim()) return;
-                  const result = parser.parse(line, lineNumber);
-                  malformedLines += result.malformed;
-                  skippedRecords += result.skipped;
-
-                  for (const warning of result.warnings) warnings.add(warning);
-
-                  for (const record of result.records) {
-                    if (
-                      record.timestamp < since ||
-                      record.timestamp >= until ||
-                      totalTokens(record.tokens) === 0
-                    )
-                      continue;
-                    const id = `${record.provider}:${record.id}`;
-
-                    if (seen.has(id)) {
-                      duplicates++;
-                      continue;
-                    }
-
-                    seen.add(id);
-                    const project = yield* resolveProject(record, source.project);
-                    const day = new Date(record.timestamp).toISOString().slice(0, 10);
-                    const key = JSON.stringify([project, day, record.provider, record.model]);
-                    const previous = rows.get(key);
-
-                    const price = lookupPrice(request.pricing, record.model);
-                    const cost = priceTokens(record.tokens, price);
-
-                    const unpricedRecords =
-                      (previous?.unpricedRecords ?? 0) + (cost === null ? 1 : 0);
-
-                    const pricedCostUsd = (previous?.pricedCostUsd ?? 0) + (cost ?? 0);
-                    rows.set(key, {
-                      project,
-                      day,
-                      provider: record.provider,
-                      model: record.model,
-                      pricePerMillion: price ?? null,
-                      tokens: addTokens(previous?.tokens ?? zeroTokens, record.tokens),
-                      records: (previous?.records ?? 0) + 1,
-                      estimatedCostUsd: unpricedRecords > 0 ? null : pricedCostUsd,
-                      pricedCostUsd,
-                      unpricedRecords,
-                    });
-                  }
+                  yield* accept(parser.parse(line, lineNumber));
                 }),
               ),
             );
+
+            if (parser.finish !== undefined) yield* accept(parser.finish());
           });
 
           const pending = [source.path];
