@@ -121,7 +121,7 @@ cache-token attributes are accepted. See the [Copilot CLI reference](https://doc
 
 VS Code Copilot telemetry, autocomplete, other IDEs, and Copilot session-state
 history import are outside this initial release. Copilot imports are covered by
-synthetic fixtures matching the CLI export format, not a live billed session test.
+synthetic fixtures matching the CLI export format and a live CLI smoke test.
 
 ## Project attribution
 
