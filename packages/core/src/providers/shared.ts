@@ -9,7 +9,7 @@ export interface ParseResult {
   readonly warnings: readonly string[];
 }
 
-/** Mutable state is scoped to one transcript, never shared across scans. */
+/** Mutable state belongs to one transcript or provider source, never shared across reports. */
 export interface TranscriptParser {
   readonly parse: (line: string, lineNumber: number) => ParseResult;
   readonly finish?: () => ParseResult;

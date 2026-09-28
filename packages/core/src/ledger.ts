@@ -5,6 +5,7 @@ import {
   Layer,
   Match,
   Path,
+  type PlatformError,
   Predicate,
   Result,
   Schema,
@@ -25,6 +26,7 @@ import { lookupPrice, priceTokens } from "./pricing.ts";
 import { projectResolver } from "./projects.ts";
 import { claudeParser } from "./providers/claude.ts";
 import { codexParser } from "./providers/codex.ts";
+import { copilotDatabaseLines, type CopilotDatabaseError } from "./providers/copilot-db.ts";
 import { copilotParser } from "./providers/copilot.ts";
 import { grokParser } from "./providers/grok.ts";
 import type { ParseResult } from "./providers/shared.ts";
@@ -91,6 +93,55 @@ export class Ledger extends Context.Service<
           let missingRoot = false;
           const warnings = new Set<string>();
 
+          const copilot = source.provider === "copilot" ? copilotParser(source.path) : undefined;
+
+          const accept = Effect.fn("Ledger.acceptRecords")(function* (result: ParseResult) {
+            malformedLines += result.malformed;
+            skippedRecords += result.skipped;
+
+            for (const warning of result.warnings) warnings.add(warning);
+
+            for (const record of result.records) {
+              if (
+                record.timestamp < since ||
+                record.timestamp >= until ||
+                totalTokens(record.tokens) === 0
+              )
+                continue;
+              const id = `${record.provider}:${record.id}`;
+
+              if (seen.has(id)) {
+                duplicates++;
+                continue;
+              }
+
+              seen.add(id);
+              const project = yield* resolveProject(record, source.project);
+              const day = new Date(record.timestamp).toISOString().slice(0, 10);
+              const key = JSON.stringify([project, day, record.provider, record.model]);
+              const previous = rows.get(key);
+
+              const price = lookupPrice(request.pricing, record.model);
+              const cost = priceTokens(record.tokens, price);
+
+              const unpricedRecords = (previous?.unpricedRecords ?? 0) + (cost === null ? 1 : 0);
+
+              const pricedCostUsd = (previous?.pricedCostUsd ?? 0) + (cost ?? 0);
+              rows.set(key, {
+                project,
+                day,
+                provider: record.provider,
+                model: record.model,
+                pricePerMillion: price ?? null,
+                tokens: addTokens(previous?.tokens ?? zeroTokens, record.tokens),
+                records: (previous?.records ?? 0) + 1,
+                estimatedCostUsd: unpricedRecords > 0 ? null : pricedCostUsd,
+                pricedCostUsd,
+                unpricedRecords,
+              });
+            }
+          });
+
           const scanFile = Effect.fn("Ledger.scanFile")(function* (file: string) {
             const canonical = yield* fs.realPath(file);
             const identity = `${source.provider}:${canonical}`;
@@ -109,63 +160,19 @@ export class Ledger extends Context.Service<
               Match.when("codex", () => codexParser(canonical)),
               Match.when("claude", () => claudeParser(canonical)),
               Match.when("grok", () => grokParser(canonical)),
-              Match.when("copilot", () => copilotParser(canonical)),
+              Match.when("copilot", () => copilot ?? copilotParser(canonical)),
               Match.exhaustive,
             );
 
             let lineNumber = 0;
             files++;
 
-            const accept = Effect.fn("Ledger.acceptRecords")(function* (result: ParseResult) {
-              malformedLines += result.malformed;
-              skippedRecords += result.skipped;
+            const lines: Stream.Stream<string, PlatformError.PlatformError | CopilotDatabaseError> =
+              source.provider === "copilot" && canonical.endsWith(".db")
+                ? Stream.fromIterableEffect(copilotDatabaseLines(canonical))
+                : fs.stream(canonical).pipe(Stream.decodeText, Stream.splitLines);
 
-              for (const warning of result.warnings) warnings.add(warning);
-
-              for (const record of result.records) {
-                if (
-                  record.timestamp < since ||
-                  record.timestamp >= until ||
-                  totalTokens(record.tokens) === 0
-                )
-                  continue;
-                const id = `${record.provider}:${record.id}`;
-
-                if (seen.has(id)) {
-                  duplicates++;
-                  continue;
-                }
-
-                seen.add(id);
-                const project = yield* resolveProject(record, source.project);
-                const day = new Date(record.timestamp).toISOString().slice(0, 10);
-                const key = JSON.stringify([project, day, record.provider, record.model]);
-                const previous = rows.get(key);
-
-                const price = lookupPrice(request.pricing, record.model);
-                const cost = priceTokens(record.tokens, price);
-
-                const unpricedRecords = (previous?.unpricedRecords ?? 0) + (cost === null ? 1 : 0);
-
-                const pricedCostUsd = (previous?.pricedCostUsd ?? 0) + (cost ?? 0);
-                rows.set(key, {
-                  project,
-                  day,
-                  provider: record.provider,
-                  model: record.model,
-                  pricePerMillion: price ?? null,
-                  tokens: addTokens(previous?.tokens ?? zeroTokens, record.tokens),
-                  records: (previous?.records ?? 0) + 1,
-                  estimatedCostUsd: unpricedRecords > 0 ? null : pricedCostUsd,
-                  pricedCostUsd,
-                  unpricedRecords,
-                });
-              }
-            });
-
-            yield* fs.stream(canonical).pipe(
-              Stream.decodeText,
-              Stream.splitLines,
+            yield* lines.pipe(
               Stream.runForEach(
                 Effect.fn("Ledger.line")(function* (line) {
                   lineNumber++;
@@ -176,7 +183,8 @@ export class Ledger extends Context.Service<
               ),
             );
 
-            if (parser.finish !== undefined) yield* accept(parser.finish());
+            if (copilot === undefined && parser.finish !== undefined)
+              yield* accept(parser.finish());
           });
 
           const pending = [source.path];
@@ -205,12 +213,18 @@ export class Ledger extends Context.Service<
             }).pipe(Effect.result);
 
             if (Result.isFailure(result)) {
-              if (entry === source.path && Predicate.isTagged(result.failure.reason, "NotFound"))
+              if (
+                entry === source.path &&
+                Predicate.isTagged(result.failure, "PlatformError") &&
+                Predicate.isTagged(result.failure.reason, "NotFound")
+              )
                 missingRoot = true;
               failedFiles++;
               warnings.add("A source path could not be read; totals may be incomplete.");
             }
           }
+
+          if (copilot?.finish !== undefined) yield* accept(copilot.finish());
 
           const status = missingRoot
             ? "missing"
@@ -265,5 +279,5 @@ function acceptsFile(source: Source, file: string): boolean {
   if (source.provider === "grok")
     return file.endsWith("/updates.jsonl") || file.endsWith("\\updates.jsonl");
 
-  return file.endsWith(".jsonl");
+  return file.endsWith(".jsonl") || (source.provider === "copilot" && file.endsWith(".db"));
 }

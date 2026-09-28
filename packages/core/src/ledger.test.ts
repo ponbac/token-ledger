@@ -1,3 +1,5 @@
+import { DatabaseSync } from "node:sqlite";
+
 import { NodeServices } from "@effect/platform-node";
 import { assert, describe, it } from "@effect/vitest";
 import { Effect, FileSystem, Layer, Path, Result, Schema } from "effect";
@@ -57,6 +59,181 @@ function request(sources: readonly Source[]) {
 }
 
 describe("Ledger reports through the public interface", () => {
+  it.effect("attributes corrected VS Code spans across files before deduplicating logs", () =>
+    Effect.gen(function* () {
+      const { write, root } = yield* fixture();
+      const endTime = [Date.parse("2026-09-22T10:00:00Z") / 1000, 0];
+
+      const usage = {
+        "gen_ai.operation.name": "chat",
+        "gen_ai.response.id": "response-a",
+        "gen_ai.response.model": "test-model",
+        "gen_ai.usage.input_tokens": 100,
+        "gen_ai.usage.output_tokens": 20,
+      };
+
+      const event = {
+        hrTime: endTime,
+        spanContext: { traceId: "a", spanId: "chat" },
+        attributes: { ...usage, "event.name": "gen_ai.client.inference.operation.details" },
+      };
+
+      const spans = [
+        {
+          traceId: "a",
+          spanId: "chat",
+          parentSpanContext: { traceId: "a", spanId: "middle" },
+          endTime,
+          attributes: { ...usage, "gen_ai.usage.cache_read.input_tokens": 60 },
+        },
+        {
+          traceId: "a",
+          spanId: "middle",
+          parentSpanContext: { traceId: "a", spanId: "root" },
+          endTime,
+          attributes: {},
+        },
+        {
+          traceId: "a",
+          spanId: "root",
+          endTime,
+          attributes: {
+            "gen_ai.operation.name": "invoke_agent",
+            "github.copilot.git.repository": "acme/alpha",
+          },
+        },
+        {
+          traceId: "b",
+          spanId: "root",
+          endTime,
+          attributes: {
+            "gen_ai.operation.name": "invoke_agent",
+            "github.copilot.git.repository": "acme/beta",
+          },
+        },
+      ];
+
+      yield* write("a-logs.jsonl", [
+        JSON.stringify(event),
+        JSON.stringify({
+          ...event,
+          spanContext: { traceId: "b", spanId: "root" },
+          attributes: { ...event.attributes, "gen_ai.response.id": "response-b" },
+        }),
+        JSON.stringify({
+          ...event,
+          spanContext: undefined,
+          attributes: { ...event.attributes, "gen_ai.response.id": "background" },
+        }),
+      ]);
+      yield* write(
+        "z-spans.jsonl",
+        [
+          ...spans,
+          {
+            traceId: "cycle",
+            spanId: "chat",
+            parentSpanContext: { traceId: "cycle", spanId: "chat" },
+            endTime,
+            attributes: { ...usage, "gen_ai.response.id": "cycle" },
+          },
+          {
+            traceId: "other",
+            spanId: "chat",
+            parentSpanContext: { traceId: "a", spanId: "root" },
+            endTime,
+            attributes: { ...usage, "gen_ai.response.id": "invalid-parent" },
+          },
+        ].map((span) => JSON.stringify(span)),
+      );
+      const ledger = yield* Ledger;
+      const report = yield* ledger.report(request([{ provider: "copilot", path: root }]));
+      assert.deepStrictEqual(
+        report.rows.map((row) => [row.project, row.records, totalTokens(row.tokens)]),
+        [
+          ["acme/alpha", 1, 120],
+          ["acme/beta", 1, 120],
+          ["Unassigned", 3, 360],
+        ],
+      );
+      assert.strictEqual(report.rows[0]?.tokens.cacheRead, 60);
+      assert.strictEqual(report.coverage[0]?.duplicates, 1);
+      assert.strictEqual(report.coverage[0]?.status, "ok");
+    }).pipe(Effect.provide(runtime)),
+  );
+
+  it.effect("reads a Copilot SQLite export with JSONL logs without changing the database", () =>
+    Effect.gen(function* () {
+      const { fs, write, root, path } = yield* fixture();
+      const file = path.join(root, "agent-traces.db");
+      const ms = Date.parse("2026-09-22T10:00:00Z");
+
+      const attributes = {
+        "gen_ai.operation.name": "chat",
+        "gen_ai.response.id": "db-response",
+        "gen_ai.response.model": "test-model",
+        "gen_ai.usage.input_tokens": 100,
+        "gen_ai.usage.output_tokens": 20,
+        "gen_ai.usage.cache_read.input_tokens": 60,
+      };
+
+      yield* Effect.gen(function* () {
+        const db = yield* Effect.acquireRelease(
+          Effect.sync(() => new DatabaseSync(file)),
+          (connection) => Effect.sync(() => connection.close()),
+        );
+
+        yield* Effect.sync(() => {
+          db.exec(`CREATE TABLE spans (span_id TEXT PRIMARY KEY, trace_id TEXT, parent_span_id TEXT, end_time_ms INTEGER);
+            CREATE TABLE span_attributes (span_id TEXT, key TEXT, value TEXT);`);
+          const span = db.prepare("INSERT INTO spans VALUES (?, ?, ?, ?)");
+          const attribute = db.prepare("INSERT INTO span_attributes VALUES (?, ?, ?)");
+          span.run("chat", "trace", "root", ms);
+          span.run("root", "trace", null, ms + 10);
+
+          for (const [key, value] of Object.entries(attributes))
+            attribute.run("chat", key, String(value));
+          attribute.run("root", "gen_ai.operation.name", "invoke_agent");
+          attribute.run(
+            "root",
+            "github.copilot.git.repository",
+            "https://github.com/acme/database.git",
+          );
+          attribute.run("chat", "unrelated.attribute", "not-accounting-data");
+        });
+      }).pipe(Effect.scoped);
+      const before = yield* fs.readFile(file);
+      yield* write("a-log.jsonl", [
+        JSON.stringify({
+          hrTime: [ms / 1000, 0],
+          attributes: {
+            ...attributes,
+            "event.name": "gen_ai.client.inference.operation.details",
+            "gen_ai.usage.cache_read.input_tokens": undefined,
+          },
+        }),
+      ]);
+      const ledger = yield* Ledger;
+      const report = yield* ledger.report(request([{ provider: "copilot", path: root }]));
+      assert.lengthOf(report.rows, 1);
+      assert.strictEqual(report.rows[0]?.project, "github.com/acme/database");
+      assert.deepStrictEqual(report.rows[0]?.tokens, {
+        input: 40,
+        output: 20,
+        cacheRead: 60,
+        cacheWrite: 0,
+      });
+      assert.strictEqual(report.rows[0]?.records, 1);
+      assert.strictEqual(report.coverage[0]?.duplicates, 1);
+      assert.strictEqual(report.coverage[0]?.status, "ok");
+      assert.deepStrictEqual(yield* fs.readFile(file), before);
+      const broken = yield* write("broken.db", ["not a SQLite database"]);
+      const failure = yield* ledger.report(request([{ provider: "copilot", path: broken }]));
+      assert.strictEqual(failure.coverage[0]?.status, "partial");
+      assert.lengthOf(failure.rows, 0);
+    }).pipe(Effect.provide(runtime)),
+  );
+
   it.effect("imports VS Code inference events once and diagnoses incomplete usage", () =>
     Effect.gen(function* () {
       const { write } = yield* fixture();

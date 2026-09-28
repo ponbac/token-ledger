@@ -3,8 +3,9 @@ import { Option, Schema } from "effect";
 import type { UsageRecord } from "../model.ts";
 import { decodeJson, empty, malformed, skipped, type TranscriptParser } from "./shared.ts";
 
-const Attributes = Schema.Struct({
-  "gen_ai.operation.name": Schema.String,
+/** Allowlisted Copilot accounting attributes, shared by JSONL and SQLite decoding. */
+export const CopilotAttributes = Schema.Struct({
+  "gen_ai.operation.name": Schema.optionalKey(Schema.String),
   "gen_ai.response.model": Schema.optionalKey(Schema.String),
   "gen_ai.response.id": Schema.optionalKey(Schema.NonEmptyString),
   "gen_ai.request.model": Schema.optionalKey(Schema.String),
@@ -20,86 +21,107 @@ const Attributes = Schema.Struct({
   "session.id": Schema.optionalKey(Schema.String),
 });
 
+const SpanContext = Schema.Struct({
+  traceId: Schema.NonEmptyString,
+  spanId: Schema.NonEmptyString,
+});
+
 const Span = Schema.Struct({
-  type: Schema.Literal("span"),
+  type: Schema.optionalKey(Schema.Literal("span")),
   traceId: Schema.NonEmptyString,
   spanId: Schema.NonEmptyString,
   parentSpanId: Schema.optionalKey(Schema.NonEmptyString),
+  parentSpanContext: Schema.optionalKey(SpanContext),
   endTime: Schema.Tuple([Schema.Natural, Schema.Natural]),
-  attributes: Attributes,
+  attributes: CopilotAttributes,
 });
 
 const InferenceEvent = Schema.Struct({
+  spanContext: Schema.optionalKey(SpanContext),
   hrTime: Schema.Tuple([Schema.Natural, Schema.Natural]),
   attributes: Schema.Struct({
-    ...Attributes.fields,
+    ...CopilotAttributes.fields,
     "event.name": Schema.Literal("gen_ai.client.inference.operation.details"),
     "gen_ai.response.id": Schema.NonEmptyString,
   }),
 });
 
 const Header = Schema.Struct({
-  type: Schema.optionalKey(Schema.String),
   attributes: Schema.Struct({
     "event.name": Schema.optionalKey(Schema.String),
     "gen_ai.operation.name": Schema.optionalKey(Schema.String),
   }),
 });
 
-/** Imports Copilot CLI spans and VS Code inference events, excluding summaries and metrics. */
+interface AttributionSpan {
+  readonly repository: string | null;
+  readonly parent: string | undefined;
+}
+
+interface Candidate {
+  readonly record: UsageRecord;
+  readonly spanKey: string | undefined;
+  readonly isSpan: boolean;
+}
+
+/** Buffers one Copilot source to resolve out-of-order spans before request deduplication. */
 export function copilotParser(file: string): TranscriptParser {
-  const repositories = new Map<string, string>();
-  const pending = new Map<string, UsageRecord[]>();
+  const spans = new Map<string, AttributionSpan>();
+  const candidates: Candidate[] = [];
 
   const warning =
-    "Copilot coverage starts when file telemetry was enabled; only inference requests are counted.";
+    "Copilot coverage starts when telemetry was enabled; only inference requests are counted.";
 
   return {
     parse(line) {
       const raw = Option.getOrNull(decodeJson(line));
 
       if (raw === null) return malformed;
-      const header = Option.getOrNull(Schema.decodeUnknownOption(Header)(raw));
+      const event = Option.getOrNull(Schema.decodeUnknownOption(InferenceEvent)(raw));
+      const exportedSpan = Option.getOrNull(Schema.decodeUnknownOption(Span)(raw));
 
-      if (header === null) return empty;
-      const operation = header.attributes["gen_ai.operation.name"];
-
-      if (
-        header.attributes["event.name"] !== "gen_ai.client.inference.operation.details" &&
-        !(header.type === "span" && (operation === "chat" || operation === "invoke_agent"))
-      )
-        return empty;
-
-      let span = Option.getOrNull(Schema.decodeUnknownOption(Span)(raw));
+      const span =
+        exportedSpan ??
+        (event === null
+          ? null
+          : {
+              traceId: event.spanContext?.traceId ?? "response",
+              spanId: event.spanContext?.spanId ?? event.attributes["gen_ai.response.id"],
+              endTime: event.hrTime,
+              attributes: event.attributes,
+            });
 
       if (span === null) {
-        const event = Option.getOrNull(Schema.decodeUnknownOption(InferenceEvent)(raw));
+        const header = Option.getOrNull(Schema.decodeUnknownOption(Header)(raw));
 
-        if (event === null) return skipped;
-        span = {
-          type: "span",
-          traceId: "response",
-          spanId: event.attributes["gen_ai.response.id"],
-          endTime: event.hrTime,
-          attributes: event.attributes,
-        };
+        return header?.attributes["event.name"] === "gen_ai.client.inference.operation.details" ||
+          (header?.attributes["event.name"] === undefined &&
+            header?.attributes["gen_ai.operation.name"] === "chat")
+          ? skipped
+          : empty;
       }
 
       const a = span.attributes;
 
-      if (a["gen_ai.operation.name"] === "invoke_agent") {
-        const key = `${span.traceId}:${span.spanId}`;
-        const repository = a["github.copilot.git.repository"] ?? a["copilot_chat.repo.remote_url"];
+      const spanKey =
+        exportedSpan !== null || event?.spanContext !== undefined
+          ? `${span.traceId}:${span.spanId}`
+          : undefined;
 
-        if (repository !== undefined) repositories.set(key, repository);
-        const children = pending.get(key) ?? [];
-        pending.delete(key);
-
-        return {
-          ...empty,
-          records: children.map((record) => ({ ...record, repository: repository ?? null })),
-          warnings: children.length > 0 ? [warning] : [],
-        };
+      if (exportedSpan !== null && spanKey !== undefined) {
+        const parent = exportedSpan.parentSpanContext;
+        spans.set(spanKey, {
+          repository:
+            a["github.copilot.git.repository"] ?? a["copilot_chat.repo.remote_url"] ?? null,
+          parent:
+            parent !== undefined
+              ? parent.traceId === span.traceId
+                ? `${parent.traceId}:${parent.spanId}`
+                : undefined
+              : exportedSpan.parentSpanId === undefined
+                ? undefined
+                : `${span.traceId}:${exportedSpan.parentSpanId}`,
+        });
       }
 
       if (a["gen_ai.operation.name"] !== "chat") return empty;
@@ -121,7 +143,7 @@ export function copilotParser(file: string): TranscriptParser {
 
       if (!Number.isFinite(new Date(ms).getTime())) return skipped;
 
-      let record: UsageRecord = {
+      const record: UsageRecord = {
         provider: "copilot",
         id:
           a["gen_ai.response.id"] === undefined
@@ -135,26 +157,49 @@ export function copilotParser(file: string): TranscriptParser {
         tokens: { input: input - cacheRead - cacheWrite, output, cacheRead, cacheWrite },
       };
 
-      if (record.repository === null && span.parentSpanId !== undefined) {
-        const key = `${span.traceId}:${span.parentSpanId}`;
-        const repository = repositories.get(key);
+      candidates.push({ record, spanKey, isSpan: exportedSpan !== null });
 
-        if (repository !== undefined) record = { ...record, repository };
+      return empty;
+    },
+    finish() {
+      const preferred = new Map<string, Candidate>();
+
+      for (const candidate of candidates) {
+        let repository = candidate.record.repository;
+        let key = candidate.spanKey;
+        const visited = new Set<string>();
+
+        while (repository === null && key !== undefined && !visited.has(key)) {
+          visited.add(key);
+          const ancestor = spans.get(key);
+          repository = ancestor?.repository ?? null;
+          key = ancestor?.parent;
+        }
+
+        const resolved = { ...candidate, record: { ...candidate.record, repository } };
+        const previous = preferred.get(resolved.record.id);
+
+        if (previous === undefined) preferred.set(resolved.record.id, resolved);
         else {
-          const children = pending.get(key);
-
-          if (children === undefined) pending.set(key, [record]);
-          else children.push(record);
-
-          return empty;
+          // Request spans include cache details omitted by inference log events.
+          const best = resolved.isSpan && !previous.isSpan ? resolved : previous;
+          preferred.set(resolved.record.id, {
+            ...best,
+            record: {
+              ...best.record,
+              repository: best.record.repository ?? repository ?? previous.record.repository,
+            },
+          });
         }
       }
 
-      return { ...empty, records: [record], warnings: [warning] };
-    },
-    finish() {
-      const records = [...pending.values()].flat();
-      pending.clear();
+      // Preserve duplicate accounting in Ledger while presenting the enriched record first.
+      const records = candidates.map(
+        (candidate) => preferred.get(candidate.record.id)?.record ?? candidate.record,
+      );
+
+      candidates.length = 0;
+      spans.clear();
 
       return { ...empty, records, warnings: records.length > 0 ? [warning] : [] };
     },

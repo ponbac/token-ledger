@@ -74,7 +74,7 @@ node packages/cli/dist/main.js report
 | Codex                      | `~/.codex/sessions` and `archived_sessions`            | Rollout token events, model switches, session and working-directory metadata |
 | Claude Code                | `~/.claude/projects`                                   | Assistant usage records; repeated message blocks counted once                |
 | Grok Build                 | `~/.grok/sessions/**/updates.jsonl`                    | Saved completed turns and their model breakdowns                             |
-| Copilot CLI / VS Code Chat | `~/.copilot/otel` or `COPILOT_OTEL_FILE_EXPORTER_PATH` | JSONL request spans and VS Code inference events from file telemetry         |
+| Copilot CLI / VS Code Chat | `~/.copilot/otel` or `COPILOT_OTEL_FILE_EXPORTER_PATH` | JSONL request spans, VS Code inference events, and SQLite span exports       |
 
 `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `GROK_HOME`, and `COPILOT_HOME` override the usual
 homes. Configuration supports additional accounts, machines' exported histories,
@@ -152,11 +152,77 @@ deduplicate copied events and matching request spans. Agent turn summaries,
 notifications, and metrics are ignored. Background inference calls, such as title
 generation, are included when exported as inference events.
 
-Exports may omit repository metadata; those requests are `Unassigned`. Use
-`--project "Client A"` or a fixed source project for an export belonging to one
-project. Unknown model prices remain unknown. Autocomplete, other IDEs, and
-Copilot session-state history import are outside this release. Copilot imports
-are covered by synthetic fixtures and live CLI / VS Code Chat export checks.
+### Automatic project attribution
+
+One shared export directory can contain usage from multiple projects. Token Ledger
+reads Copilot CLI spans and the corrected VS Code JSONL span format, follows parent
+spans to `github.copilot.git.repository` (or `copilot_chat.repo.remote_url`), and
+matches inference events by trace/span context or response ID. Parent spans can
+arrive later or in another file within the same source directory. Matching request
+spans supply cache-token details that inference logs may omit; the request is
+counted once. Agent summaries are never counted as additional requests.
+
+This uses the repository remote, not a local directory. Configure repository
+mappings below to choose project names. Requests without usable repository linkage,
+including some background calls and folders without a remote, remain `Unassigned`.
+Multi-root workspaces follow the repository Copilot attaches to each agent span;
+tokens are not split between folders. A fixed `--project` overrides attribution for
+an export belonging to one project.
+
+### Workaround for VS Code's file exporter bug
+
+VS Code 1.139.1 can write spans as empty `{}` lines, losing the metadata needed for
+attribution while inference logs still contain token counts. Microsoft's
+[fix](https://github.com/microsoft/vscode/pull/337373) is marked released in Insiders
+and targets 1.140 in the [tracking issue](https://github.com/microsoft/vscode/issues/319993).
+Token Ledger supports the corrected format, but cannot reconstruct spans already
+lost from an export.
+
+On affected builds, enable the **built-in SQLite span exporter** alongside the file
+settings above:
+
+```json
+{
+  "github.copilot.chat.otel.dbSpanExporter.enabled": true,
+  "github.copilot.chat.otel.captureContent": false
+}
+```
+
+Reload the VS Code window, use Copilot Chat, then run **Chat: Export Agent Traces DB**
+from the command palette. Save it as `~/.copilot/otel/agent-traces.db` alongside the
+JSONL files, and report the whole directory:
+
+```sh
+bun run dev report --provider copilot --source ~/.copilot/otel
+```
+
+Token Ledger opens `.db` files read-only and selects only accounting attributes.
+The exported database is a snapshot; export again to include subsequent sessions.
+For ongoing collection you can instead read VS Code's live `agent-traces.db` with
+`--source`, or symlink it into the shared export directory on systems that support
+symlinks. For example, with the usual Linux stable storage path:
+
+```sh
+ln -s "$HOME/.config/Code/User/globalStorage/github.copilot-chat/agent-traces.db" \
+  "$HOME/.copilot/otel/vscode-spans.db"
+```
+
+Its location is under the active VS Code profile's extension global
+storage (`github.copilot-chat`); custom profiles, remote hosts, and Insiders use
+different storage roots. Resolve a symlink to the live database rather than copying
+an open database without its WAL; the built-in export command flushes and checkpoints
+before copying.
+
+Keep related JSONL and database files in **one source directory** to correlate and
+deduplicate them before project attribution. Separately configured sources use
+first-source-wins deduplication. Export paths and custom OTel resource attributes
+are application-scoped VS Code settings; a fixed project value is unsuitable for
+simultaneous usage across projects.
+
+Unknown model prices remain unknown. Autocomplete, other IDEs, and Copilot
+session-state history import are outside this release. Copilot imports are covered
+by synthetic fixtures and live CLI, VS Code JSONL, and SQLite export checks; database coverage
+starts when its exporter is enabled.
 
 ## Project attribution
 
