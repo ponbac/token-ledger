@@ -1,6 +1,6 @@
 import { Schema } from "effect";
 
-/** Supported local history formats; editor telemetry is outside this contract. */
+/** Supported local histories and Copilot CLI / VS Code Chat telemetry exports. */
 export const Provider = Schema.Literals(["codex", "claude", "grok", "copilot"]);
 
 /** A provider's local history format. */

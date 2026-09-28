@@ -35,6 +35,6 @@ reports; an Effect CLI handles configuration, presentation, and process lifecycl
 
 ## Scope
 
-Codex, Claude Code, Grok Build histories and Copilot CLI telemetry exports.
-VS Code Copilot telemetry is intentionally excluded. A later UI should call the
-same core through a local backend; the core must not render terminal output.
+Codex, Claude Code, Grok Build histories and Copilot CLI / VS Code Chat telemetry
+exports. Autocomplete and other IDE telemetry are excluded. A later UI should call
+the same core through a local backend; the core must not render terminal output.

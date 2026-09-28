@@ -69,12 +69,12 @@ node packages/cli/dist/main.js report
 
 ## Collection coverage
 
-| Provider    | Default input                                          | Coverage                                                                     |
-| ----------- | ------------------------------------------------------ | ---------------------------------------------------------------------------- |
-| Codex       | `~/.codex/sessions` and `archived_sessions`            | Rollout token events, model switches, session and working-directory metadata |
-| Claude Code | `~/.claude/projects`                                   | Assistant usage records; repeated message blocks counted once                |
-| Grok Build  | `~/.grok/sessions/**/updates.jsonl`                    | Saved completed turns and their model breakdowns                             |
-| Copilot CLI | `~/.copilot/otel` or `COPILOT_OTEL_FILE_EXPORTER_PATH` | JSONL `chat` spans from the CLI's file exporter                              |
+| Provider                   | Default input                                          | Coverage                                                                     |
+| -------------------------- | ------------------------------------------------------ | ---------------------------------------------------------------------------- |
+| Codex                      | `~/.codex/sessions` and `archived_sessions`            | Rollout token events, model switches, session and working-directory metadata |
+| Claude Code                | `~/.claude/projects`                                   | Assistant usage records; repeated message blocks counted once                |
+| Grok Build                 | `~/.grok/sessions/**/updates.jsonl`                    | Saved completed turns and their model breakdowns                             |
+| Copilot CLI / VS Code Chat | `~/.copilot/otel` or `COPILOT_OTEL_FILE_EXPORTER_PATH` | JSONL request spans and VS Code inference events from file telemetry         |
 
 `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `GROK_HOME`, and `COPILOT_HOME` override the usual
 homes. Configuration supports additional accounts, machines' exported histories,
@@ -115,13 +115,48 @@ Windows terminals, also run:
 On Bash or Zsh, add the `export` line to your shell startup file to persist it.
 
 Then run `bun run dev report --provider copilot`. This does not backfill earlier
-sessions. Only request spans are counted, so parent summaries and metric exports
+sessions. Only inference requests are counted, so parent summaries and metric exports
 cannot add the same usage twice. Both documented dotted and older underscored
 cache-token attributes are accepted. See the [Copilot CLI reference](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference#opentelemetry-monitoring).
 
-VS Code Copilot telemetry, autocomplete, other IDEs, and Copilot session-state
-history import are outside this initial release. Copilot imports are covered by
-synthetic fixtures matching the CLI export format and a live CLI smoke test.
+### VS Code Copilot Chat
+
+In your active VS Code profile's user settings, enable local file export:
+
+```json
+{
+  "github.copilot.chat.otel.enabled": true,
+  "github.copilot.chat.otel.exporterType": "file",
+  "github.copilot.chat.otel.outfile": "/absolute/path/to/.copilot/otel/vscode-chat.jsonl",
+  "github.copilot.chat.otel.captureContent": false
+}
+```
+
+Replace the output path with an absolute path on your machine, create its parent
+directory, reload VS Code, and start a new chat. On Windows, use a path such as
+`C:/Users/you/.copilot/otel/vscode-chat.jsonl`. See the
+[VS Code monitoring documentation](https://code.visualstudio.com/docs/agents/guides/monitoring-agents).
+
+Read that export, or combine CLI and Chat files from the same directory:
+
+```sh
+bun run dev report --provider copilot --source ~/.copilot/otel/vscode-chat.jsonl
+bun run dev report --provider copilot --source ~/.copilot/otel
+```
+
+Both use the `copilot` provider. Default discovery reads `~/.copilot/otel`, unless
+`COPILOT_OTEL_FILE_EXPORTER_PATH` selects a specific file; `--source` overrides it.
+VS Code inference events require a response ID, timestamp, and input/output token
+counts. Missing or invalid fields are reported as skipped usage. Response IDs
+deduplicate copied events and matching request spans. Agent turn summaries,
+notifications, and metrics are ignored. Background inference calls, such as title
+generation, are included when exported as inference events.
+
+Exports may omit repository metadata; those requests are `Unassigned`. Use
+`--project "Client A"` or a fixed source project for an export belonging to one
+project. Unknown model prices remain unknown. Autocomplete, other IDEs, and
+Copilot session-state history import are outside this release. Copilot imports
+are covered by synthetic fixtures and live CLI / VS Code Chat export checks.
 
 ## Project attribution
 

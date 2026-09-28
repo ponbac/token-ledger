@@ -57,6 +57,72 @@ function request(sources: readonly Source[]) {
 }
 
 describe("Ledger reports through the public interface", () => {
+  it.effect("imports VS Code inference events once and diagnoses incomplete usage", () =>
+    Effect.gen(function* () {
+      const { write } = yield* fixture();
+
+      const attributes = {
+        "event.name": "gen_ai.client.inference.operation.details",
+        "gen_ai.operation.name": "chat",
+        "gen_ai.response.id": "response-a",
+        "gen_ai.response.model": "test-model",
+        "gen_ai.usage.input_tokens": 100,
+        "gen_ai.usage.output_tokens": 20,
+        "gen_ai.usage.cache_read.input_tokens": 60,
+        "copilot_chat.repo.remote_url": "https://github.com/acme/example.git",
+      };
+
+      const event = {
+        hrTime: [Date.parse("2026-09-22T10:00:00Z") / 1000, 0],
+        attributes,
+      };
+
+      const file = yield* write("vscode.jsonl", [
+        JSON.stringify({ type: "span", name: "custom_notification", attributes: {} }),
+        JSON.stringify({ resource: {}, scopeMetrics: [] }),
+        JSON.stringify(event),
+        JSON.stringify(event),
+        JSON.stringify({
+          ...event,
+          attributes: { ...attributes, "gen_ai.response.id": "response-b" },
+        }),
+        JSON.stringify({
+          type: "span",
+          traceId: "trace",
+          spanId: "span",
+          endTime: event.hrTime,
+          attributes,
+        }),
+        JSON.stringify({
+          ...event,
+          attributes: { ...attributes, "event.name": "copilot_chat.agent.turn" },
+        }),
+        JSON.stringify({
+          ...event,
+          attributes: { ...attributes, "gen_ai.usage.input_tokens": undefined },
+        }),
+        JSON.stringify({
+          ...event,
+          attributes: { ...attributes, "gen_ai.response.id": undefined },
+        }),
+      ]);
+
+      const ledger = yield* Ledger;
+      const report = yield* ledger.report(request([{ provider: "copilot", path: file }]));
+      assert.strictEqual(report.rows[0]?.project, "github.com/acme/example");
+      assert.strictEqual(report.rows[0]?.records, 2);
+      assert.deepStrictEqual(report.rows[0]?.tokens, {
+        input: 80,
+        cacheRead: 120,
+        cacheWrite: 0,
+        output: 40,
+      });
+      assert.strictEqual(report.coverage[0]?.duplicates, 2);
+      assert.strictEqual(report.coverage[0]?.skippedRecords, 2);
+      assert.strictEqual(report.coverage[0]?.status, "partial");
+    }).pipe(Effect.provide(runtime)),
+  );
+
   it.effect(
     "counts cached tokens once, deduplicates copied files, and preserves equal-sized distinct requests",
     () =>
