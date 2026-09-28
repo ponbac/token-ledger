@@ -38,6 +38,11 @@ npx @ponbac/token-ledger@latest config-example > token-ledger.json
 JSON stdout contains only the structured report, including coverage and pricing
 metadata; diagnostics go to stderr. Unknown costs are `null`, not zero.
 Terminal reports sort projects by descending API estimate, with color when supported.
+The `Cost %` column shows each project’s share of the total API estimate. With
+incomplete pricing, `Known cost %` shows shares of the priced subtotal; unknown
+costs are excluded. A zero subtotal shows `—`. Percentages use unrounded costs
+and are displayed to one decimal place, so rounded project shares may not sum
+exactly to 100%.
 Set `NO_COLOR=1` for plain output. Run `--help` for options.
 
 ### Run from source
@@ -361,7 +366,7 @@ For manual publication:
 1. Log in with `npm login` using an account with publish access to `@ponbac/token-ledger`.
 2. Run `bun run check`. The CLI test packs the package, installs it offline outside
    the repository with lifecycle scripts disabled, and exercises the installed CLI.
-3. Run `bun run pack` to create `dist/ponbac-token-ledger-0.1.0.tgz` (filename follows version).
+3. Run `bun run pack` to create `dist/ponbac-token-ledger-0.1.1.tgz` (filename follows version).
 4. Inspect `npm publish ./dist/npm --dry-run`.
 5. Publish with `npm publish ./dist/npm --access public`; complete npm's authentication
    prompt if requested.

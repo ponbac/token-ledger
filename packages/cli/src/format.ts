@@ -73,12 +73,29 @@ export function table(report: UsageReport, columns = 120, colorful = false): str
   if (projects.size === 0)
     return `No observed usage from ${report.since} through ${report.until} (UTC).`;
 
-  const headings = ["Project", "Input", "Cache read", "Cache write", "Output", "API estimate"];
+  const cost = [...projects.values()].reduce((sum, project) => sum + project.cost, 0);
+  const unpriced = [...projects.values()].reduce((sum, project) => sum + project.unpriced, 0);
+
+  const headings = [
+    "Project",
+    "Input",
+    "Cache read",
+    "Cache write",
+    "Output",
+    "API estimate",
+    unpriced ? "Known cost %" : "Cost %",
+  ];
+
+  const percentage = new Intl.NumberFormat("en-US", {
+    style: "percent",
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+  });
+
+  const share = (value: number) => (cost > 0 ? percentage.format(value / cost) : "—");
   const number = new Intl.NumberFormat("en-US");
   const dollars = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
   let allTokens = zeroTokens;
-  let cost = 0;
-  let unpriced = 0;
   const rows: string[][] = [];
 
   const ranked = [...projects].toSorted(
@@ -94,10 +111,9 @@ export function table(report: UsageReport, columns = 120, colorful = false): str
       number.format(total.tokens.cacheWrite),
       number.format(total.tokens.output),
       `${dollars.format(total.cost)}${total.unpriced ? " + unknown" : ""}`,
+      share(total.cost),
     ]);
     allTokens = addTokens(allTokens, total.tokens);
-    cost += total.cost;
-    unpriced += total.unpriced;
   }
 
   rows.push([
@@ -107,6 +123,7 @@ export function table(report: UsageReport, columns = 120, colorful = false): str
     number.format(allTokens.cacheWrite),
     number.format(allTokens.output),
     `${dollars.format(cost)}${unpriced ? " + unknown" : ""}`,
+    share(cost),
   ]);
 
   const numericWidths = headings
@@ -115,8 +132,10 @@ export function table(report: UsageReport, columns = 120, colorful = false): str
       (heading, i) => Math.max(heading.length, ...rows.map((row) => row[i + 1]?.length ?? 0)) + 2,
     );
 
-  // Six columns have seven borders; leave at least 20 characters for project names.
-  const projectWidth = columns - numericWidths.reduce((sum, width) => sum + width, 0) - 7;
+  // Each column adds a border; leave at least 20 characters for project names.
+  const projectWidth =
+    columns - numericWidths.reduce((sum, width) => sum + width, 0) - (headings.length + 1);
+
   const narrow = projectWidth < 22;
 
   const colWidths = narrow
@@ -126,7 +145,9 @@ export function table(report: UsageReport, columns = 120, colorful = false): str
   const output = new Table({
     head: narrow ? [] : headings.map((heading) => paint(["bold", "cyan"], heading)),
     colWidths,
-    colAligns: narrow ? ["left", "right"] : ["left", "right", "right", "right", "right", "right"],
+    colAligns: narrow
+      ? ["left", "right"]
+      : ["left", "right", "right", "right", "right", "right", "right"],
     wordWrap: false,
     style: { head: [], border: [] },
   });
@@ -159,7 +180,7 @@ export function table(report: UsageReport, columns = 120, colorful = false): str
 
       if (column === 0) return paint(projectColors[index % projectColors.length] ?? "cyan", cell);
 
-      if (column === headings.length - 1)
+      if (column >= headings.length - 2)
         return paint(value.includes("unknown") ? "yellow" : "green", cell);
 
       return cell === "0" ? paint("dim", cell) : cell;
@@ -189,7 +210,7 @@ export function table(report: UsageReport, columns = 120, colorful = false): str
       ? [
           paint(
             "yellow",
-            "Incomplete pricing: sorted by known API subtotal; unknown costs are additional.",
+            "Incomplete pricing: sorting and percentages use known API subtotals; unknown costs are additional.",
           ),
         ]
       : []),
