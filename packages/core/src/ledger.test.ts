@@ -6,6 +6,7 @@ import { DateTime, Effect, FileSystem, Layer, Path, Result, Schema } from "effec
 
 import { Ledger } from "./ledger.ts";
 import { PriceBook, ReportRequest, UsageReport, totalTokens, type Source } from "./model.ts";
+import { SyncPayload } from "./sync.ts";
 
 const runtime = Ledger.layer.pipe(Layer.provideMerge(NodeServices.layer));
 
@@ -678,6 +679,201 @@ describe("Ledger reports through the public interface", () => {
           ["2026-09-22", 1],
           ["2026-09-23", 1],
         ],
+      );
+    }).pipe(Effect.provide(runtime)),
+  );
+});
+
+describe("Ledger sync payloads through the public interface", () => {
+  const client = {
+    machine: { id: "5f0c5a1e-3b8e-4d8e-9a57-0d7b1c1f2e3a", label: "test-machine" },
+    version: "0.0.0-test",
+  };
+
+  const session = (id: string, cwd: string, usage: readonly string[], model = "test-model") => [
+    JSON.stringify({ type: "session_meta", payload: { id, cwd } }),
+    JSON.stringify({ type: "turn_context", payload: { model } }),
+    ...usage,
+  ];
+
+  it.effect("uploads hourly session buckets without local paths or raw session IDs", () =>
+    Effect.gen(function* () {
+      const { write, root, path } = yield* fixture();
+      const at = (directory: string) => path.join(root, directory);
+      yield* write("repo/.git/config", [
+        '[remote "origin"]',
+        "url = https://user:secret@example.com/company/app.git",
+      ]);
+      yield* write("local/.git/config", [
+        '[remote "origin"]',
+        `url = file://fileserver${at("upstream.git")}`,
+      ]);
+      yield* write(
+        "codex/a.jsonl",
+        session("codex-secret-a", at("repo"), [
+          codexUsage("10:01:00", 100, 20, 100),
+          codexUsage("10:02:00", 100, 20, 200),
+          codexUsage("11:00:00", 100, 20, 300),
+        ]),
+      );
+      yield* write(
+        "codex/b.jsonl",
+        session("codex-secret-b", at("local"), [codexUsage("10:00:00")]),
+      );
+      yield* write(
+        "codex/c.jsonl",
+        session("codex-secret-c", at("plain"), [codexUsage("10:00:00")], "private-model"),
+      );
+      yield* write(
+        "codex/d.jsonl",
+        session("codex-secret-d", at("mapped"), [codexUsage("10:00:00")]),
+      );
+      // Without a session ID, Claude falls back to the transcript path as the session.
+      yield* write("claude/transcript.jsonl", [
+        JSON.stringify({
+          type: "assistant",
+          timestamp: "2026-09-22T10:30:00Z",
+          cwd: at("plain"),
+          message: {
+            id: "message",
+            model: "test-model",
+            usage: { input_tokens: 10, output_tokens: 5 },
+          },
+        }),
+      ]);
+
+      const ledger = yield* Ledger;
+
+      const input = {
+        ...request([
+          { provider: "codex", path: at("codex") },
+          { provider: "claude", path: at("claude") },
+          { provider: "grok", path: at("absent") },
+        ]),
+        since: "2026-09-22",
+        until: "2026-09-22",
+        timeZone: DateTime.zoneMakeNamedUnsafe("Europe/Stockholm"),
+        projects: [{ project: "Client A", paths: [at("mapped")], repositories: [] }],
+      };
+
+      const payload = yield* ledger.syncPayload(input, client);
+      assert.deepStrictEqual(payload.window, {
+        start: "2026-09-21T22:00:00.000Z",
+        end: "2026-09-22T22:00:00.000Z",
+      });
+      assert.deepStrictEqual(
+        payload.buckets
+          .map((bucket) => [
+            bucket.hourStart.slice(11, 13),
+            bucket.provider,
+            bucket.project,
+            bucket.model,
+            bucket.records,
+            bucket.estimatedCostUsd === null,
+          ])
+          .toSorted((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
+        [
+          ["10", "claude", "unattributed", "test-model", 1, false],
+          ["10", "codex", "Client A", "test-model", 1, false],
+          ["10", "codex", "example.com/company/app", "test-model", 2, false],
+          ["10", "codex", "unattributed", "private-model", 1, true],
+          ["10", "codex", "unattributed", "test-model", 1, false],
+          ["11", "codex", "example.com/company/app", "test-model", 1, false],
+        ],
+      );
+      assert.strictEqual(new Set(payload.buckets.map((bucket) => bucket.sessionKey)).size, 5);
+      assert.deepStrictEqual(
+        payload.coverage.map((entry) => [entry.provider, entry.status]),
+        [
+          ["claude", "ok"],
+          ["codex", "ok"],
+          ["grok", "missing"],
+        ],
+      );
+
+      const encoded = JSON.stringify(payload);
+      assert.notInclude(encoded, root);
+      assert.notInclude(encoded, "secret");
+
+      // No JSON string starts with a POSIX, home, or Windows drive path.
+      assert.notMatch(encoded, /"(?:[/~]|[A-Za-z]:\\\\)/);
+      assert.deepStrictEqual(Schema.decodeUnknownSync(SyncPayload)(JSON.parse(encoded)), payload);
+      assert.deepStrictEqual(yield* ledger.syncPayload(input, client), payload);
+    }).pipe(Effect.provide(runtime)),
+  );
+
+  it.effect("withholds a provider whose history could not all be read", () =>
+    Effect.gen(function* () {
+      const { fs, write, root, path } = yield* fixture();
+      yield* write("codex/readable.jsonl", session("readable", root, [codexUsage("10:00:00")]));
+      yield* fs.symlink(path.join(root, "gone.jsonl"), path.join(root, "codex/unreadable.jsonl"));
+      const ledger = yield* Ledger;
+
+      const payload = yield* ledger.syncPayload(
+        {
+          ...request([{ provider: "codex", path: path.join(root, "codex") }]),
+          since: "2026-09-22",
+          until: "2026-09-22",
+        },
+        client,
+      );
+
+      assert.deepStrictEqual(
+        payload.coverage.map((entry) => [entry.provider, entry.status, entry.unreadable]),
+        [["codex", "failed", 1]],
+      );
+      assert.lengthOf(payload.buckets, 0);
+    }).pipe(Effect.provide(runtime)),
+  );
+
+  it.effect("returns a safe typed failure when report pricing cannot enter a sync payload", () =>
+    Effect.gen(function* () {
+      const ledger = yield* Ledger;
+      const input = request([]);
+      const valid = yield* ledger.syncPayload(input, client);
+      assert.strictEqual(valid.pricing.source, "test-fixture");
+
+      for (const pricing of [
+        { ...input.pricing, fetchedAt: "yesterday" },
+        { ...input.pricing, source: "x".repeat(513) },
+        { ...input.pricing, source: "private\0value" },
+      ]) {
+        const result = yield* ledger.syncPayload({ ...input, pricing }, client).pipe(Effect.result);
+        assert.isTrue(Result.isFailure(result));
+
+        if (Result.isFailure(result)) {
+          assert.strictEqual(result.failure._tag, "InvalidRequest");
+          assert.notInclude(result.failure.message, pricing.source);
+          assert.notInclude(result.failure.message, "yesterday");
+        }
+      }
+    }).pipe(Effect.provide(runtime)),
+  );
+
+  it.effect("widens windows to whole UTC hours in zones with half-hour offsets", () =>
+    Effect.gen(function* () {
+      const { write, root } = yield* fixture();
+      // 00:15 on September 23 in Kolkata, inside the UTC hour that ends September 22's window.
+      yield* write("kolkata.jsonl", session("kolkata", root, [codexUsage("18:45:00")]));
+      const ledger = yield* Ledger;
+
+      const payload = yield* ledger.syncPayload(
+        {
+          ...request([{ provider: "codex", path: root }]),
+          since: "2026-09-22",
+          until: "2026-09-22",
+          timeZone: DateTime.zoneMakeNamedUnsafe("Asia/Kolkata"),
+        },
+        client,
+      );
+
+      assert.deepStrictEqual(payload.window, {
+        start: "2026-09-21T18:00:00.000Z",
+        end: "2026-09-22T19:00:00.000Z",
+      });
+      assert.deepStrictEqual(
+        payload.buckets.map((bucket) => bucket.hourStart),
+        ["2026-09-22T18:00:00.000Z"],
       );
     }).pipe(Effect.provide(runtime)),
   );
