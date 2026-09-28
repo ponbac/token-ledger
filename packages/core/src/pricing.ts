@@ -64,7 +64,7 @@ export function addUsage(
   };
 }
 
-/** Downloads only a public rate table, caching a decoded snapshot. Provider histories never leave the machine. */
+/** Downloads only a public rate table, caching a decoded snapshot; sends nothing about local usage. */
 export const loadPrices = Effect.fn("Pricing.load")(function* (
   cachePath: string,
   offline: boolean,

@@ -307,7 +307,8 @@ overlapping files: the first configured source owns their project attribution.
 
 The CLI fetches the public LiteLLM model-rate table and caches the decoded snapshot
 for 24 hours under `$XDG_CACHE_HOME/token-ledger` (default `~/.cache/token-ledger`).
-Only this public pricing request uses the network; histories are processed locally.
+Histories are processed locally. `report` only uses the network for this public
+pricing request; `sync` also uploads aggregated usage, as described below.
 `--offline` uses cached prices and config overrides. A failed refresh falls back to
 cached prices, with the snapshot timestamp retained in JSON.
 
@@ -341,6 +342,43 @@ Exit codes: `0` for a generated report, `1` for invalid input or a fatal error, 
 `2` with `--strict` when a source is missing/partial/failed or tokens are unpriced.
 Ordinary mode still produces a partial report when some providers are unavailable.
 Keep developer identity alongside exported reports when combining them across a team.
+
+## Sync to toki2
+
+`sync` uploads this machine's usage to a [toki2](https://github.com/ponbac/toki2)
+server, which combines every developer's machines for team reporting and billing:
+
+```sh
+export TOKEN_LEDGER_SERVER="https://toki.example.com"
+export TOKI_API_TOKEN="toki_…"
+bun run dev sync --dry-run   # print the payload; upload nothing
+bun run dev sync
+```
+
+The server and API token come from `--server`/`--token`, then `TOKEN_LEDGER_SERVER`/
+`TOKI_API_TOKEN`, then `sync.json` (`{ "server": "…", "token": "…" }`) in the
+settings directory: `$XDG_CONFIG_HOME/token-ledger`, `~/.config/token-ledger` on Linux,
+`~/Library/Application Support/token-ledger` on macOS, or `%APPDATA%\token-ledger` on
+Windows. The token only travels over HTTPS, or HTTP to localhost. The first run
+creates `machine.json` there with a random machine ID and an editable label; keep it,
+since a new ID makes the same history count as another machine.
+
+Only hourly per-session totals leave the machine: tokens, request counts, and
+API-equivalent cost by project, provider, and model. Session IDs are hashed, and
+projects are configured names or Git remotes; anything identified only by a local
+path is sent as `unattributed`. Prompts, responses, individual requests, and paths
+are never uploaded. See [the payload contract](docs/sync-v1.md).
+
+The default window is the last 14 local days. For each provider whose history was
+fully read, the server replaces what this machine sent for it in the window, so
+re-running is safe. A provider with no history found, or with unreadable history,
+keeps its stored data, as do providers left out with `--provider`. Syncing a window
+older than a provider's retention would still replace good data with less: Claude
+Code deletes transcripts after 30 days by default, and `sync` warns about such windows.
+
+Exit codes: `0` synced, `1` invalid input or settings, `2` refused by `--strict`,
+`3` server unreachable or temporarily failing (retry later), `4` token or machine
+refused, `5` unsupported payload version (upgrade token-ledger), `6` payload rejected.
 
 ## Accuracy and limitations
 
