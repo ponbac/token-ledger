@@ -69,9 +69,10 @@ node packages/cli/dist/main.js report --provider codex
 
 ### Windows
 
-The CLI is intended to run on Windows with Bun, or with Node.js 24+ for the built
-executable, but Windows compatibility has not yet been verified. With Git and Bun
-installed, run these commands in PowerShell:
+The packaged CLI is tested in CI on Windows, macOS, and Linux using Node.js 24.
+Those checks cover package installation and reports from synthetic histories; live
+provider discovery has been verified on Linux. To run from source on Windows with
+Git and Bun installed, use PowerShell:
 
 ```powershell
 git clone https://github.com/ponbac/token-ledger.git
