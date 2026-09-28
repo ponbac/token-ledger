@@ -24,7 +24,10 @@ These are equivalent alternatives; choose the package manager you already use.
 The npm package contains a bundled CLI with no runtime dependencies or install
 scripts. `bunx` uses the Node shebang, so Node 24+ is still required.
 
-The default window is the current calendar month through today, in UTC. Read every
+The default window is the current calendar month through today. `--since` and
+`--until` are inclusive local calendar days in the system time zone; select another
+IANA zone with `--time-zone`, such as `--time-zone Europe/Stockholm`. Days follow
+daylight saving time, so a day can last 23 or 25 hours. Read every
 supported source by omitting `--provider`. Configure Copilot collection before
 starting sessions as described below; installing the CLI does not enable telemetry.
 
@@ -323,8 +326,9 @@ applied to the whole selected history; historical price changes, service tiers,
 tool charges, taxes, negotiated discounts, and subscription allocations are not
 modeled. Provider-reported credit or dollar figures do not override this estimate.
 
-JSON is a versioned report with pricing provenance, applied unit rates, coverage diagnostics, and rows
-grouped by project/day/provider/model. CSV instead matches the terminal summary:
+JSON is a versioned report (version 2; version 1 used UTC days) with pricing provenance, applied unit rates, coverage diagnostics, and rows
+grouped by project/day/provider/model. Its `timeZone` field names the IANA zone of
+`since`, `until`, and each row's `day`. CSV instead matches the terminal summary:
 one row per project, sorted by known API cost, plus a Total row. It includes token
 totals, API estimates rounded to two decimals, and cost percentages. Incomplete
 costs display `+ unknown`, and percentages use only the known subtotal. Neither

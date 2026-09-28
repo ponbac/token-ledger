@@ -136,7 +136,7 @@ await test("npm artifact installs offline and exports reports with correct cover
           cwd: directory,
           encoding: "utf8",
           timeout: 30_000,
-          env: { ...process.env, HOME: directory, XDG_CACHE_HOME: directory },
+          env: { ...process.env, HOME: directory, XDG_CACHE_HOME: directory, TZ: "Asia/Tokyo" },
         },
       );
 
@@ -147,6 +147,7 @@ await test("npm artifact installs offline and exports reports with correct cover
 
     const report = decodeReport(json.stdout);
 
+    assert.equal(report.timeZone, "Asia/Tokyo");
     assert.equal(report.rows[0]?.project, "Client A");
     assert.equal(report.rows[0]?.tokens.cacheRead, 60);
     assert.equal(report.rows[0]?.estimatedCostUsd, 0.000292);
@@ -155,6 +156,12 @@ await test("npm artifact installs offline and exports reports with correct cover
 
     assert.equal(shortcut.status, 0, shortcut.stderr);
     assert.deepEqual(decodeReport(shortcut.stdout), report);
+
+    const zoned = run(["--json", "--time-zone", "Europe/Stockholm"]);
+
+    assert.equal(zoned.status, 0, zoned.stderr);
+    assert.equal(decodeReport(zoned.stdout).timeZone, "Europe/Stockholm");
+    assert.equal(run(["--time-zone", "Mars/Olympus"]).status, 1);
 
     const csv = run(["--format", "csv", "--project", "=formula"]);
 
