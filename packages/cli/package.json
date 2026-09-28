@@ -1,5 +1,5 @@
 {
-  "name": "token-ledger",
+  "name": "@ponbac/token-ledger",
   "version": "0.1.0",
   "private": true,
   "type": "module",

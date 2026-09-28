@@ -12,31 +12,26 @@ cache prices stay unknown; the known subtotal remains available.
 
 ## Quick start
 
-Requires **Node.js 24 or newer**. Once the first npm release is published, run
-without cloning or building:
+Requires **Node.js 24 or newer**. Run without cloning or building:
 
 ```sh
-npx token-ledger@latest report --provider copilot
-pnpx token-ledger@latest report --provider copilot
-bunx token-ledger@latest report --provider copilot
+npx @ponbac/token-ledger@latest report --provider copilot
+pnpx @ponbac/token-ledger@latest report --provider copilot
+bunx @ponbac/token-ledger@latest report --provider copilot
 ```
 
 These are equivalent alternatives; choose the package manager you already use.
 The npm package contains a bundled CLI with no runtime dependencies or install
 scripts. `bunx` uses the Node shebang, so Node 24+ is still required.
 
-**Publication status:** the npm package is prepared but the first release has not
-yet been published. Until then, use the source checkout below or install a release
-tarball with `npm install -g ./token-ledger-0.1.0.tgz`.
-
 The default window is the current calendar month through today, in UTC. Read every
 supported source by omitting `--provider`. Configure Copilot collection before
 starting sessions as described below; installing the CLI does not enable telemetry.
 
 ```sh
-npx token-ledger@latest report --since 2026-09-01 --until 2026-09-30 --format csv > usage.csv
-npx token-ledger@latest report --provider codex --json > report.json
-npx token-ledger@latest config-example > token-ledger.json
+npx @ponbac/token-ledger@latest report --since 2026-09-01 --until 2026-09-30 --format csv > usage.csv
+npx @ponbac/token-ledger@latest report --provider codex --json > report.json
+npx @ponbac/token-ledger@latest config-example > token-ledger.json
 ```
 
 `--json` is a shortcut for `--format json` and takes precedence over `--format`.
@@ -57,7 +52,7 @@ bun run dev report --provider codex
 ```
 
 Examples below use `bun run dev`; replace that prefix with
-`npx token-ledger@latest`, `pnpx token-ledger@latest`, or `bunx token-ledger@latest`
+`npx @ponbac/token-ledger@latest`, `pnpx @ponbac/token-ledger@latest`, or `bunx @ponbac/token-ledger@latest`
 when using the published package.
 
 Build a standalone Node executable and the npm package directory:
@@ -361,15 +356,15 @@ package in `dist/npm`, copying only the bundled executable, manifest, README,
 project license, and bundled dependency license notices. The CLI version comes
 from `packages/cli/package.json`.
 
-For the first publication:
+For manual publication:
 
-1. Confirm the npm name `token-ledger` is available and log in with `npm login`.
+1. Log in with `npm login` using an account with publish access to `@ponbac/token-ledger`.
 2. Run `bun run check`. The CLI test packs the package, installs it offline outside
    the repository with lifecycle scripts disabled, and exercises the installed CLI.
-3. Run `bun run pack` to create `dist/token-ledger-0.1.0.tgz` (filename follows version).
+3. Run `bun run pack` to create `dist/ponbac-token-ledger-0.1.0.tgz` (filename follows version).
 4. Inspect `npm publish ./dist/npm --dry-run`.
 5. Publish with `npm publish ./dist/npm --access public`; complete npm's authentication
-   prompt if requested. Remove the pending-publication note above when released.
+   prompt if requested.
 
 For subsequent releases, update the CLI manifest version, commit it, and rerun the
 checks. The manual **Publish npm package** GitHub Actions workflow also runs checks

@@ -76,7 +76,7 @@ await test("npm artifact installs offline and exports reports with correct cover
       "--no-audit",
       "--no-fund",
     ]);
-    const installed = join(directory, "node_modules/token-ledger");
+    const installed = join(directory, "node_modules/@ponbac/token-ledger");
     const manifest = decodeManifest(readFileSync(join(installed, "package.json"), "utf8"));
     assert.equal(manifest.dependencies, undefined);
     assert.equal(manifest.scripts, undefined);
