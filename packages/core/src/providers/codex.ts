@@ -1,6 +1,6 @@
 // Fork-copy handling is adapted from T3 Code (MIT); see THIRD_PARTY_NOTICES.md.
 import { Option, Schema } from "effect";
-import type { Tokens } from "../model.ts";
+import { RepositoryReference, type Tokens, type UsageRecord } from "../model.ts";
 import {
   decodeJson,
   empty,
@@ -56,7 +56,7 @@ export function codexParser(file: string): TranscriptParser {
   let session = file;
   let model = "unknown";
   let cwd: string | null = null;
-  let repository: string | null = null;
+  let repository: UsageRecord["repository"] = null;
   let sawMeta = false;
   let copyAnchor: number | null = null;
   let lastSignature: string | null = null;
@@ -78,7 +78,8 @@ export function codexParser(file: string): TranscriptParser {
         sawMeta = true;
         session = meta.id ?? meta.session_id ?? file;
         cwd = meta.cwd ?? null;
-        repository = meta.git?.repository_url ?? null;
+        const remote = meta.git?.repository_url;
+        repository = remote === undefined ? null : RepositoryReference.Remote({ value: remote });
 
         if (
           meta.forked_from_id !== undefined ||

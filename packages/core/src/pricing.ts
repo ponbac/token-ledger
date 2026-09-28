@@ -1,7 +1,7 @@
 import { Clock, Effect, FileSystem, Option, Path, Schema } from "effect";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 
-import { ModelPrice, PriceBook, type Tokens } from "./model.ts";
+import { ModelPrice, PriceBook, type Tokens, addTokens, zeroTokens } from "./model.ts";
 
 const ratesUrl =
   "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
@@ -35,6 +35,33 @@ export function priceTokens(tokens: Tokens, price: ModelPrice | undefined): numb
       tokens.cacheWrite * (price.cacheWrite ?? 0)) /
     1_000_000
   );
+}
+
+/** Running totals. Any unpriced record makes the estimate unknown, never zero; the priced subtotal remains. */
+export interface UsageTotals {
+  readonly tokens: Tokens;
+  readonly records: number;
+  readonly estimatedCostUsd: number | null;
+  readonly pricedCostUsd: number;
+  readonly unpricedRecords: number;
+}
+
+/** Adds one record's tokens and its cost, `null` when the record could not be priced. */
+export function addUsage(
+  previous: UsageTotals | undefined,
+  tokens: Tokens,
+  cost: number | null,
+): UsageTotals {
+  const pricedCostUsd = (previous?.pricedCostUsd ?? 0) + (cost ?? 0);
+  const unpricedRecords = (previous?.unpricedRecords ?? 0) + (cost === null ? 1 : 0);
+
+  return {
+    tokens: addTokens(previous?.tokens ?? zeroTokens, tokens),
+    records: (previous?.records ?? 0) + 1,
+    estimatedCostUsd: unpricedRecords > 0 ? null : pricedCostUsd,
+    pricedCostUsd,
+    unpricedRecords,
+  };
 }
 
 /** Downloads only a public rate table, caching a decoded snapshot. Provider histories never leave the machine. */

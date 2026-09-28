@@ -14,12 +14,16 @@ const decodeCalendarParts = Schema.decodeUnknownSync(
   }),
 );
 
-/** Local calendar days from `since` through `until` and the UTC instants that bound them. */
-export interface DayWindow {
-  /** First instant of `since`, in epoch milliseconds; inclusive. */
+/** A half-open range of instants in epoch milliseconds. */
+export interface InstantRange {
+  /** Inclusive. */
   readonly start: number;
-  /** First instant after `until`, in epoch milliseconds; exclusive. */
+  /** Exclusive. */
   readonly end: number;
+}
+
+/** Local calendar days from `since` through `until`; `start` begins `since` and `end` follows `until`. */
+export interface DayWindow extends InstantRange {
   /** The local day containing an instant, or `undefined` outside `[start, end)`. */
   readonly dayOf: (timestamp: number) => Day | undefined;
 }
