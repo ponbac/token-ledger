@@ -12,41 +12,15 @@ function csvCell(value: string | number | null): string {
   return `"${safe.replaceAll('"', '""')}"`;
 }
 
-/** One project/day/provider/model row per CSV line. Blank cost is unknown, not zero. */
+/** Project totals matching the terminal table, with a total row and spreadsheet-safe cells. */
 export function csv(report: UsageReport): string {
-  const header = [
-    "project",
-    "day_utc",
-    "provider",
-    "model",
-    "input_tokens",
-    "cache_read_tokens",
-    "cache_write_tokens",
-    "output_tokens",
-    "estimated_api_cost_usd",
-    "priced_subtotal_usd",
-    "unpriced_records",
-  ];
+  const summary = projectSummary(report, false);
 
-  const rows = report.rows.map((row) =>
-    [
-      row.project,
-      row.day,
-      row.provider,
-      row.model,
-      row.tokens.input,
-      row.tokens.cacheRead,
-      row.tokens.cacheWrite,
-      row.tokens.output,
-      row.estimatedCostUsd,
-      row.pricedCostUsd,
-      row.unpricedRecords,
-    ]
-      .map(csvCell)
-      .join(","),
+  const headings = summary.headings.map((heading) =>
+    heading === "API estimate" ? "API estimate (USD)" : heading,
   );
 
-  return [header.join(","), ...rows].join("\n");
+  return [headings, ...summary.rows].map((row) => row.map(csvCell).join(",")).join("\n");
 }
 
 function terminalText(value: string): string {
@@ -54,11 +28,7 @@ function terminalText(value: string): string {
   return value.replace(/[\x00-\x1f\x7f-\x9f]/g, " ");
 }
 
-/** Per-project totals fitted to terminal columns, sorted by known API cost, with optional styling and sanitized identifiers. */
-export function table(report: UsageReport, columns = 120, colorful = false): string {
-  const paint = (format: Parameters<typeof styleText>[0], value: string) =>
-    colorful ? styleText(format, value, { validateStream: false }) : value;
-
+function projectSummary(report: UsageReport, grouped: boolean) {
   const projects = new Map<string, { tokens: typeof zeroTokens; cost: number; unpriced: number }>();
 
   for (const row of report.rows) {
@@ -69,9 +39,6 @@ export function table(report: UsageReport, columns = 120, colorful = false): str
       unpriced: (previous?.unpriced ?? 0) + row.unpricedRecords,
     });
   }
-
-  if (projects.size === 0)
-    return `No observed usage from ${report.since} through ${report.until} (UTC).`;
 
   const cost = [...projects.values()].reduce((sum, project) => sum + project.cost, 0);
   const unpriced = [...projects.values()].reduce((sum, project) => sum + project.unpriced, 0);
@@ -93,8 +60,14 @@ export function table(report: UsageReport, columns = 120, colorful = false): str
   });
 
   const share = (value: number) => (cost > 0 ? percentage.format(value / cost) : "—");
-  const number = new Intl.NumberFormat("en-US");
-  const dollars = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
+  const number = new Intl.NumberFormat("en-US", { useGrouping: grouped });
+
+  const dollars = new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    useGrouping: grouped,
+  });
+
   let allTokens = zeroTokens;
   const rows: string[][] = [];
 
@@ -105,7 +78,7 @@ export function table(report: UsageReport, columns = 120, colorful = false): str
 
   for (const [project, total] of ranked) {
     rows.push([
-      terminalText(project),
+      project,
       number.format(total.tokens.input),
       number.format(total.tokens.cacheRead),
       number.format(total.tokens.cacheWrite),
@@ -116,15 +89,30 @@ export function table(report: UsageReport, columns = 120, colorful = false): str
     allTokens = addTokens(allTokens, total.tokens);
   }
 
-  rows.push([
-    "Total",
-    number.format(allTokens.input),
-    number.format(allTokens.cacheRead),
-    number.format(allTokens.cacheWrite),
-    number.format(allTokens.output),
-    `${dollars.format(cost)}${unpriced ? " + unknown" : ""}`,
-    share(cost),
-  ]);
+  if (projects.size > 0)
+    rows.push([
+      "Total",
+      number.format(allTokens.input),
+      number.format(allTokens.cacheRead),
+      number.format(allTokens.cacheWrite),
+      number.format(allTokens.output),
+      `${dollars.format(cost)}${unpriced ? " + unknown" : ""}`,
+      share(cost),
+    ]);
+
+  return { headings, rows, allTokens, unpriced, projectCount: projects.size };
+}
+
+/** Per-project totals fitted to terminal columns, sorted by known API cost, with optional styling and sanitized identifiers. */
+export function table(report: UsageReport, columns = 120, colorful = false): string {
+  const paint = (format: Parameters<typeof styleText>[0], value: string) =>
+    colorful ? styleText(format, value, { validateStream: false }) : value;
+
+  const { headings, rows, allTokens, unpriced, projectCount } = projectSummary(report, true);
+  const number = new Intl.NumberFormat("en-US");
+
+  if (projectCount === 0)
+    return `No observed usage from ${report.since} through ${report.until} (UTC).`;
 
   const numericWidths = headings
     .slice(1)
@@ -170,7 +158,7 @@ export function table(report: UsageReport, columns = 120, colorful = false): str
         : (colWidths[column] ?? 4) - 2;
 
       // cli-table3's hard wrapping splits ANSI sequences; wrap before styling instead.
-      const cell = wrapAnsi(value, Math.max(2, width), {
+      const cell = wrapAnsi(terminalText(value), Math.max(2, width), {
         hard: true,
         wordWrap: false,
         trim: false,
@@ -204,7 +192,7 @@ export function table(report: UsageReport, columns = 120, colorful = false): str
     "",
     paint(
       "bold",
-      `${colorful ? "📊 " : ""}${number.format(totalTokens(allTokens))} observed tokens · ${number.format(projects.size)} ${projects.size === 1 ? "project" : "projects"}`,
+      `${colorful ? "📊 " : ""}${number.format(totalTokens(allTokens))} observed tokens · ${number.format(projectCount)} ${projectCount === 1 ? "project" : "projects"}`,
     ),
     ...(unpriced > 0
       ? [

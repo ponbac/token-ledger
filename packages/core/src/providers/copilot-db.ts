@@ -1,5 +1,3 @@
-import { DatabaseSync } from "node:sqlite";
-
 import { Effect, Option, Schema } from "effect";
 
 import { CopilotAttributes } from "./copilot.ts";
@@ -24,6 +22,11 @@ const databaseError = () =>
 /** Reads only accounting attributes from a VS Code agent-traces.db snapshot, without modifying it. */
 export const copilotDatabaseLines = Effect.fn("Copilot.readDatabase")(function* (file: string) {
   return yield* Effect.gen(function* () {
+    const { DatabaseSync } = yield* Effect.tryPromise({
+      try: () => import("node:sqlite"),
+      catch: databaseError,
+    });
+
     const db = yield* Effect.acquireRelease(
       Effect.try({ try: () => new DatabaseSync(file, { readOnly: true }), catch: databaseError }),
       (connection) => Effect.sync(() => connection.close()),

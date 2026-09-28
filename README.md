@@ -324,8 +324,11 @@ tool charges, taxes, negotiated discounts, and subscription allocations are not
 modeled. Provider-reported credit or dollar figures do not override this estimate.
 
 JSON is a versioned report with pricing provenance, applied unit rates, coverage diagnostics, and rows
-grouped by project/day/provider/model. CSV exports those rows with empty estimated
-cost cells when any usage is unpriced. Neither format includes prompts or responses;
+grouped by project/day/provider/model. CSV instead matches the terminal summary:
+one row per project, sorted by known API cost, plus a Total row. It includes token
+totals, API estimates rounded to two decimals, and cost percentages. Incomplete
+costs display `+ unknown`, and percentages use only the known subtotal. Neither
+format includes prompts or responses;
 JSON coverage does contain configured source paths. CSV escapes spreadsheet formula
 prefixes in identifiers. Coverage diagnostics also go to stderr, leaving stdout
 usable for piping.
@@ -366,7 +369,7 @@ For manual publication:
 1. Log in with `npm login` using an account with publish access to `@ponbac/token-ledger`.
 2. Run `bun run check`. The CLI test packs the package, installs it offline outside
    the repository with lifecycle scripts disabled, and exercises the installed CLI.
-3. Run `bun run pack` to create `dist/ponbac-token-ledger-0.1.1.tgz` (filename follows version).
+3. Run `bun run pack` to create `dist/ponbac-token-ledger-0.1.2.tgz` (filename follows version).
 4. Inspect `npm publish ./dist/npm --dry-run`.
 5. Publish with `npm publish ./dist/npm --access public`; complete npm's authentication
    prompt if requested.

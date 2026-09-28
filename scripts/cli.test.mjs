@@ -160,7 +160,8 @@ await test("npm artifact installs offline and exports reports with correct cover
 
     assert.equal(csv.status, 0, csv.stderr);
     assert.match(csv.stdout, /"'=formula"/);
-    assert.equal(csv.stdout.trim().split("\n").length, 2);
+    assert.equal(csv.stdout.trim().split("\n").length, 3);
+    assert.doesNotMatch(csv.stderr, /ExperimentalWarning.*SQLite/);
 
     writeFileSync(configuration, "{}");
 

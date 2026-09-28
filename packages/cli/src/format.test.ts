@@ -1,7 +1,7 @@
 import { assert, it } from "@effect/vitest";
 import { ReportRow, UsageReport } from "@token-ledger/core/model";
 
-import { table } from "./format.ts";
+import { csv, table } from "./format.ts";
 
 function report(costs: readonly number[], unpriced = false) {
   return UsageReport.make({
@@ -48,4 +48,21 @@ it("labels shares of incomplete pricing and leaves a zero denominator undefined"
     assert.notMatch(zero, /\d\.\d%|NaN|Infinity/);
     assert.include(zero, "—");
   }
+});
+
+it("exports the project summary as simple CSV with rounded costs and a total", () => {
+  assert.strictEqual(
+    csv(report([1.1, 2.2, 7.7])),
+    [
+      '"Project","Input","Cache read","Cache write","Output","API estimate (USD)","Cost %"',
+      '"Beta","10","0","0","0","$7.70","70.0%"',
+      '"Alpha","20","0","0","0","$3.30","30.0%"',
+      '"Total","30","0","0","0","$11.00","100.0%"',
+    ].join("\n"),
+  );
+  const partial = csv(report([1, 2, 7], true));
+  assert.include(partial, '"Known cost %"');
+  assert.include(partial, '"$10.00 + unknown","100.0%"');
+  assert.include(csv(report([0, 0, 0])), '"$0.00","—"');
+  assert.strictEqual(csv(report([])).split("\n").length, 1);
 });
