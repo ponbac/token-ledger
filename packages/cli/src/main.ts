@@ -15,6 +15,8 @@ import { Clock, Config, Console, Effect, FileSystem, Match, Option, Path, Schema
 import { Command, Flag } from "effect/unstable/cli";
 import { FetchHttpClient } from "effect/unstable/http";
 
+import metadata from "../package.json" with { type: "json" };
+
 import { csv, table } from "./format.ts";
 
 class CliError extends Schema.TaggedError<CliError>()("CliError", { message: Schema.String }) {}
@@ -252,7 +254,7 @@ Command.make("token-ledger").pipe(
     "Local token accounting across coding agents. API estimates, not subscription bills.",
   ),
   Command.withSubcommands([report, example]),
-  Command.run({ version: "0.1.0" }),
+  Command.run({ version: metadata.version }),
   Effect.provide(Ledger.layer),
   Effect.provide(NodeServices.layer),
   Effect.provide(FetchHttpClient.layer),

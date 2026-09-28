@@ -12,6 +12,41 @@ cache prices stay unknown; the known subtotal remains available.
 
 ## Quick start
 
+Requires **Node.js 24 or newer**. Once the first npm release is published, run
+without cloning or building:
+
+```sh
+npx token-ledger@latest report --provider copilot
+pnpx token-ledger@latest report --provider copilot
+bunx token-ledger@latest report --provider copilot
+```
+
+These are equivalent alternatives; choose the package manager you already use.
+The npm package contains a bundled CLI with no runtime dependencies or install
+scripts. `bunx` uses the Node shebang, so Node 24+ is still required.
+
+**Publication status:** the npm package is prepared but the first release has not
+yet been published. Until then, use the source checkout below or install a release
+tarball with `npm install -g ./token-ledger-0.1.0.tgz`.
+
+The default window is the current calendar month through today, in UTC. Read every
+supported source by omitting `--provider`. Configure Copilot collection before
+starting sessions as described below; installing the CLI does not enable telemetry.
+
+```sh
+npx token-ledger@latest report --since 2026-09-01 --until 2026-09-30 --format csv > usage.csv
+npx token-ledger@latest report --provider codex --json > report.json
+npx token-ledger@latest config-example > token-ledger.json
+```
+
+`--json` is a shortcut for `--format json` and takes precedence over `--format`.
+JSON stdout contains only the structured report, including coverage and pricing
+metadata; diagnostics go to stderr. Unknown costs are `null`, not zero.
+Terminal reports sort projects by descending API estimate, with color when supported.
+Set `NO_COLOR=1` for plain output. Run `--help` for options.
+
+### Run from source
+
 Install [Bun](https://bun.sh), then:
 
 ```sh
@@ -21,31 +56,16 @@ bun install --frozen-lockfile
 bun run dev report --provider codex
 ```
 
-The default window is the current calendar month through today, in UTC. Read every
-supported source by omitting `--provider`. Terminal reports sort projects by descending
-API estimate (known subtotal when pricing is incomplete), with color and emoji accents
-on color-capable terminals. Set `NO_COLOR=1` for plain output.
+Examples below use `bun run dev`; replace that prefix with
+`npx token-ledger@latest`, `pnpx token-ledger@latest`, or `bunx token-ledger@latest`
+when using the published package.
 
-```sh
-bun run dev report --since 2026-09-01 --until 2026-09-30
-bun run dev report --provider codex --json > report.json
-bun run dev report --provider codex --format csv > report.csv
-bun run dev report --provider codex --source ~/history/session.jsonl --project "Client A"
-```
-
-`--json` is a shortcut for `--format json` and takes precedence over `--format`.
-JSON stdout contains only the structured report, including coverage and pricing
-metadata; diagnostics go to stderr. Unknown costs are `null`, not zero.
-
-Build a standalone Node executable (Node 24 or newer):
+Build a standalone Node executable and the npm package directory:
 
 ```sh
 bun run build
 node packages/cli/dist/main.js report --provider codex
 ```
-
-This repository is not yet published to npm. Run `--help` on the executable or any
-subcommand for options. Effect CLI also provides completion scripts and `--wizard`.
 
 ### Windows
 
@@ -317,8 +337,9 @@ Keep developer identity alongside exported reports when combining them across a 
 ## Accuracy and limitations
 
 - Reports reflect saved, readable local history, not an authoritative provider invoice.
-- Scans stream files rather than loading transcripts into memory. This initial version
-  rescans histories on each run; deduplication state grows with observed usage records.
+- JSONL files are streamed, while Copilot buffers accounting records and span links
+  per source for attribution; SQLite imports read the selected accounting rows. Each
+  run rescans its sources, and memory grows with observed usage records.
 - Copied files, overlapping source paths, and stable provider record IDs are deduplicated.
   Missing stable IDs are called out where the provider cannot support that guarantee.
 - Codex fork histories use T3 Code's timing heuristic to exclude the leading copied
@@ -331,6 +352,31 @@ Keep developer identity alongside exported reports when combining them across a 
   lacks a remote. Explicit mappings make attribution more stable across machines.
 - A session that works across projects still needs an explicit allocation policy;
   tokens cannot identify which client benefited from an individual generated line.
+
+## Publishing
+
+The workspace packages stay private. `bun run build` creates the publishable
+package in `dist/npm`, copying only the bundled executable, manifest, README,
+project license, and bundled dependency license notices. The CLI version comes
+from `packages/cli/package.json`.
+
+For the first publication:
+
+1. Confirm the npm name `token-ledger` is available and log in with `npm login`.
+2. Run `bun run check`. The CLI test packs the package, installs it offline outside
+   the repository with lifecycle scripts disabled, and exercises the installed CLI.
+3. Run `bun run pack` to create `dist/token-ledger-0.1.0.tgz` (filename follows version).
+4. Inspect `npm publish ./dist/npm --dry-run`.
+5. Publish with `npm publish ./dist/npm --access public`; complete npm's authentication
+   prompt if requested. Remove the pending-publication note above when released.
+
+For subsequent releases, update the CLI manifest version, commit it, and rerun the
+checks. The manual **Publish npm package** GitHub Actions workflow also runs checks
+before publishing from `main`. Configure an
+[npm trusted publisher](https://docs.npmjs.com/trusted-publishers/) for GitHub owner
+`ponbac`, repository `token-ledger`, workflow `publish.yml`, with direct publishing
+allowed, before using it. This uses GitHub OIDC rather than a stored npm token.
+An already published version cannot be reused.
 
 ## Development
 

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -10,14 +10,81 @@ import { Schema } from "effect";
 
 import { UsageReport } from "../packages/core/src/model.ts";
 
-const executable = fileURLToPath(new URL("../packages/cli/dist/main.js", import.meta.url));
+const packageDirectory = fileURLToPath(new URL("../dist/npm", import.meta.url));
+
+const PackedArchive = Schema.Struct({
+  filename: Schema.String,
+  files: Schema.Array(Schema.Struct({ path: Schema.String })),
+});
+
+const decodePack = Schema.decodeUnknownSync(
+  Schema.fromJsonString(
+    Schema.Union([Schema.Array(PackedArchive), Schema.Record(Schema.String, PackedArchive)]),
+  ),
+);
+
+const decodeManifest = Schema.decodeUnknownSync(
+  Schema.fromJsonString(
+    Schema.Struct({
+      version: Schema.String,
+      dependencies: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
+      scripts: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
+    }),
+  ),
+);
 
 const decodeReport = Schema.decodeUnknownSync(Schema.fromJsonString(UsageReport));
 
-await test("built CLI exports reports, protects CSV cells, and exposes incomplete pricing through exit codes", () => {
+await test("npm artifact installs offline and exports reports with correct coverage and exit codes", () => {
   const directory = mkdtempSync(join(tmpdir(), "token-ledger-cli-"));
 
   try {
+    /** @param {string[]} args */
+    const npm = (args) => {
+      const result = spawnSync("npm", args, {
+        cwd: directory,
+        encoding: "utf8",
+        timeout: 30_000,
+        shell: process.platform === "win32",
+      });
+
+      assert.equal(result.error, undefined);
+      assert.equal(result.status, 0, result.stderr);
+
+      return result.stdout;
+    };
+
+    const packed = Object.values(
+      decodePack(npm(["pack", packageDirectory, "--json", "--ignore-scripts", "--offline"])),
+    );
+
+    assert.equal(packed.length, 1);
+    const archive = packed[0];
+    assert.ok(archive);
+    assert.deepEqual(archive.files.map((file) => file.path).toSorted(), [
+      "LICENSE",
+      "README.md",
+      "THIRD_PARTY_NOTICES.txt",
+      "dist/main.js",
+      "package.json",
+    ]);
+    npm([
+      "install",
+      join(directory, archive.filename),
+      "--offline",
+      "--ignore-scripts",
+      "--no-audit",
+      "--no-fund",
+    ]);
+    const installed = join(directory, "node_modules/token-ledger");
+    const manifest = decodeManifest(readFileSync(join(installed, "package.json"), "utf8"));
+    assert.equal(manifest.dependencies, undefined);
+    assert.equal(manifest.scripts, undefined);
+    assert.equal(
+      npm(["exec", "--offline", "--", "token-ledger", "--version"]).trim(),
+      `token-ledger v${manifest.version}`,
+    );
+    const executable = join(installed, "dist/main.js");
     const history = join(directory, "history.jsonl");
     const configuration = join(directory, "token-ledger.json");
 

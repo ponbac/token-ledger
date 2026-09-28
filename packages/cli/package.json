@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "bin": {
-    "token-ledger": "./dist/main.js"
+    "token-ledger": "dist/main.js"
   },
   "dependencies": {
     "@effect/platform-node": "4.0.0-rc.117",
@@ -12,5 +12,19 @@
     "cli-table3": "^0.6.5",
     "effect": "4.0.0-rc.117",
     "wrap-ansi": "^10.0.2"
+  },
+  "description": "Local AI token usage and API-equivalent cost reports by project",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ponbac/token-ledger.git",
+    "directory": "packages/cli"
+  },
+  "homepage": "https://github.com/ponbac/token-ledger#readme",
+  "bugs": {
+    "url": "https://github.com/ponbac/token-ledger/issues"
   }
 }
