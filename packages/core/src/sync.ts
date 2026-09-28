@@ -187,6 +187,13 @@ function distinct<A>(items: readonly A[], key: (item: A) => string): boolean {
   return new Set(items.map(key)).size === items.length;
 }
 
+/** A plan hint from one provider's history, before hourly deduplication. */
+export interface ObservedPlan {
+  readonly provider: Provider;
+  readonly timestamp: number;
+  readonly plan: string;
+}
+
 /** Project name for usage whose only attribution is a local path or nothing. */
 export const unattributed = "unattributed";
 
@@ -304,4 +311,25 @@ export function providerCoverage(coverage: readonly Coverage[]): SyncCoverage[] 
       } satisfies SyncCoverage;
     })
     .toSorted((a, b) => a.provider.localeCompare(b.provider));
+}
+
+/** Collects each plan a provider reported during each UTC hour once; `finish` sorts them. */
+export function planHints() {
+  const hints = new Map<string, ProviderHint>();
+
+  return {
+    add({ provider, timestamp, plan: reported }: ObservedPlan): void {
+      const hourStart = new Date(Math.floor(timestamp / hour) * hour).toISOString();
+      const plan = storable(reported);
+      hints.set(JSON.stringify([hourStart, provider, plan]), { provider, hourStart, plan });
+    },
+    finish(): ProviderHint[] {
+      return [...hints.values()].toSorted(
+        (a, b) =>
+          a.hourStart.localeCompare(b.hourStart) ||
+          a.provider.localeCompare(b.provider) ||
+          a.plan.localeCompare(b.plan),
+      );
+    },
+  };
 }

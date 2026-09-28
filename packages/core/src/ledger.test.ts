@@ -802,6 +802,97 @@ describe("Ledger sync payloads through the public interface", () => {
     }).pipe(Effect.provide(runtime)),
   );
 
+  it.effect("reports each Codex plan once per hour in the window, excluding fork copies", () =>
+    Effect.gen(function* () {
+      const { write, root } = yield* fixture();
+
+      const limits = (time: string, plan: string | null, input = 0) =>
+        JSON.stringify({
+          type: "event_msg",
+          timestamp: time,
+          payload: {
+            type: "token_count",
+            info:
+              input === 0 ? null : { last_token_usage: { input_tokens: input, output_tokens: 5 } },
+            rate_limits: { primary: { used_percent: 1 }, plan_type: plan },
+          },
+        });
+
+      yield* write(
+        "plans.jsonl",
+        session("plans", root, [
+          limits("2026-09-22T10:05:00Z", "pro"),
+          limits("2026-09-22T10:30:00Z", "pro", 10),
+          limits("2026-09-22T11:00:00Z", null, 20),
+          // An unexpected rate-limit format must not cost the event its usage.
+          JSON.stringify({
+            type: "event_msg",
+            timestamp: "2026-09-22T11:30:00Z",
+            payload: {
+              type: "token_count",
+              info: { last_token_usage: { input_tokens: 25, output_tokens: 5 } },
+              rate_limits: 42,
+            },
+          }),
+          limits("2026-09-22T12:10:00Z", "pro"),
+          limits("2026-09-23T22:30:00Z", "plus"),
+        ]),
+      );
+      // A fork re-stamps its parent's history, and the parent's plan, at the fork time.
+      yield* write("fork.jsonl", [
+        JSON.stringify({
+          type: "session_meta",
+          timestamp: "2026-09-22T13:00:00Z",
+          payload: { id: "fork", forked_from_id: "plans", cwd: root },
+        }),
+        JSON.stringify({ type: "turn_context", payload: { model: "test-model" } }),
+        limits("2026-09-22T13:00:00.100Z", "plus"),
+        limits("2026-09-22T13:00:00.200Z", "plus", 30),
+        // The one-second threshold measures consecutive gaps, not the whole copied burst.
+        ...Array.from({ length: 30 }, (_, index) =>
+          limits(
+            new Date(Date.parse("2026-09-22T13:00:00Z") + 240 + index * 40).toISOString(),
+            "plus",
+          ),
+        ),
+        limits("2026-09-22T13:30:00Z", "pro", 40),
+      ]);
+
+      const ledger = yield* Ledger;
+
+      const payload = yield* ledger.syncPayload(
+        {
+          ...request([{ provider: "codex", path: root }]),
+          since: "2026-09-22",
+          until: "2026-09-22",
+          timeZone: DateTime.zoneMakeNamedUnsafe("Europe/Stockholm"),
+        },
+        client,
+      );
+
+      assert.deepStrictEqual(
+        payload.providerHints?.map((hint) => [
+          hint.provider,
+          hint.hourStart.slice(11, 13),
+          hint.plan,
+        ]),
+        [
+          ["codex", "10", "pro"],
+          ["codex", "12", "pro"],
+          ["codex", "13", "pro"],
+        ],
+      );
+      assert.deepStrictEqual(
+        payload.buckets.map((bucket) => [bucket.hourStart.slice(11, 13), bucket.records]),
+        [
+          ["10", 1],
+          ["11", 2],
+          ["13", 1],
+        ],
+      );
+    }).pipe(Effect.provide(runtime)),
+  );
+
   it.effect("withholds a provider whose history could not all be read", () =>
     Effect.gen(function* () {
       const { fs, write, root, path } = yield* fixture();
