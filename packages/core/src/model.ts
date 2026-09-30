@@ -1,4 +1,4 @@
-import { Schema } from "effect";
+import { Data, Schema } from "effect";
 
 /** Supported local histories and Copilot CLI / VS Code Chat telemetry exports. */
 export const Provider = Schema.Literals(["codex", "claude", "grok", "copilot"]);
@@ -17,11 +17,14 @@ export const Tokens = Schema.Struct({
 /** Normalized token counts, with cached tokens excluded from ordinary input. */
 export interface Tokens extends Schema.Schema.Type<typeof Tokens> {}
 
+/** A configured project name, trimmed: it becomes a shared key when usage is synced. */
+export const ProjectName = Schema.Trim.check(Schema.isMinLength(1));
+
 /** A directory to scan, or one JSONL file. A fixed project overrides inference. */
 export const Source = Schema.Struct({
   provider: Provider,
   path: Schema.NonEmptyString,
-  project: Schema.optionalKey(Schema.NonEmptyString),
+  project: Schema.optionalKey(ProjectName),
 });
 
 /** A configured source, independent of the machine's conventional home paths. */
@@ -29,7 +32,7 @@ export interface Source extends Schema.Schema.Type<typeof Source> {}
 
 /** Explicit project ownership; paths are directory prefixes, repositories are remote URLs. */
 export const ProjectMapping = Schema.Struct({
-  project: Schema.NonEmptyString,
+  project: ProjectName,
   paths: Schema.Array(Schema.NonEmptyString),
   repositories: Schema.Array(Schema.NonEmptyString),
 });
@@ -71,6 +74,15 @@ export const PriceBook = Schema.Struct({
 /** A decoded rate snapshot. */
 export interface PriceBook extends Schema.Schema.Type<typeof PriceBook> {}
 
+/** Repository metadata distinguishes Git transports from provider-reported repository names. */
+export type RepositoryReference = Data.TaggedEnum<{
+  Remote: { readonly value: string };
+  Identity: { readonly value: string };
+}>;
+
+/** Preserves adapter knowledge of whether repository metadata is a Git transport or a name. */
+export const RepositoryReference = Data.taggedEnum<RepositoryReference>();
+
 /** One decoded observation; identifiers only, never prompts or responses. */
 export interface UsageRecord {
   readonly provider: Provider;
@@ -79,7 +91,7 @@ export interface UsageRecord {
   readonly timestamp: number;
   readonly model: string;
   readonly cwd: string | null;
-  readonly repository: string | null;
+  readonly repository: RepositoryReference | null;
   readonly tokens: Tokens;
 }
 
@@ -115,13 +127,14 @@ export const Coverage = Schema.Struct({
   source: Schema.String,
   status: Schema.Literals(["ok", "missing", "partial", "failed"]),
   files: Schema.Natural,
+  unreadable: Schema.Natural,
   malformedLines: Schema.Natural,
   skippedRecords: Schema.Natural,
   duplicates: Schema.Natural,
   warnings: Schema.Array(Schema.String),
 });
 
-/** Completeness evidence, not a guarantee that the provider retained all history. */
+/** Completeness evidence, not a guarantee that the provider retained all history. `unreadable` counts existing paths that could not be read. */
 export interface Coverage extends Schema.Schema.Type<typeof Coverage> {}
 
 /** One project/day/provider/model aggregate, by local day. Null cost means some tokens could not be priced. */
