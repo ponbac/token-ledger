@@ -31,9 +31,11 @@ import { copilotParser } from "./providers/copilot.ts";
 import { grokParser } from "./providers/grok.ts";
 import type { ParseResult } from "./providers/shared.ts";
 import {
+  type ObservedPlan,
   SyncClient,
   SyncPayload,
   hourRange,
+  planHints,
   providerCoverage,
   replacedProviders,
   sessionBuckets,
@@ -90,13 +92,14 @@ export class Ledger extends Context.Service<
       });
 
       /**
-       * Streams each deduplicated, non-empty record that `locate` places, with its project.
-       * Records outside the window are neither deduplicated nor attributed.
+       * Streams each deduplicated, non-empty record that `locate` places, with its project, and
+       * each plan hint it places. Records outside the window are neither deduplicated nor attributed.
        */
       const scan = Effect.fn("Ledger.scan")(function* <Slot>(
         request: ReportRequest,
         locate: (timestamp: number) => Slot | undefined,
         collect: (record: UsageRecord, attribution: Attribution, slot: Slot) => void,
+        notice?: (plan: ObservedPlan) => void,
       ) {
         const resolveProject = yield* projectResolver(request.projects).pipe(
           Effect.provideService(FileSystem.FileSystem, fs),
@@ -123,6 +126,11 @@ export class Ledger extends Context.Service<
             skippedRecords += result.skipped;
 
             for (const warning of result.warnings) warnings.add(warning);
+
+            for (const hint of result.hints) {
+              if (locate(hint.timestamp) !== undefined)
+                notice?.({ provider: source.provider, ...hint });
+            }
 
             for (const record of result.records) {
               const slot = locate(record.timestamp);
@@ -308,6 +316,7 @@ export class Ledger extends Context.Service<
         // Local midnights are not whole UTC hours in every zone; widen so hours are never split.
         const window = hourRange(dayWindow(request.since, request.until, request.timeZone));
         const buckets = sessionBuckets(request.pricing);
+        const hints = planHints();
 
         const coverage = yield* scan(
           request,
@@ -315,6 +324,7 @@ export class Ledger extends Context.Service<
             timestamp >= window.start && timestamp < window.end ? timestamp : undefined,
           (record, attribution) =>
             buckets.add(record, attribution.shareable ? attribution.project : unattributed),
+          (plan) => hints.add(plan),
         );
 
         const summary = providerCoverage(coverage);
@@ -339,6 +349,7 @@ export class Ledger extends Context.Service<
           // Unread history must not replace stored usage with less; drop those providers.
           buckets: buckets.finish().filter((bucket) => replaced.has(bucket.provider)),
           coverage: summary,
+          providerHints: hints.finish().filter((hint) => replaced.has(hint.provider)),
         }).pipe(
           Effect.mapError(
             () =>

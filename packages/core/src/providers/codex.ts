@@ -51,6 +51,12 @@ const Usage = Schema.Struct({
   ),
 });
 
+// ChatGPT sign-ins report their plan, such as "pro"; API keys report none. Decoded apart from
+// usage so that a change in this optional field can never lose token counts.
+const Plan = Schema.Struct({
+  rate_limits: Schema.Struct({ plan_type: Schema.NonEmptyString }),
+});
+
 /** Reads Codex rollout metadata and token events, preserving per-turn working directories. */
 export function codexParser(file: string): TranscriptParser {
   let session = file;
@@ -108,33 +114,36 @@ export function codexParser(file: string): TranscriptParser {
       const usage = Option.getOrNull(Schema.decodeUnknownOption(Usage)(event.payload));
 
       if (usage === null) return line.includes('"token_count"') ? skipped : empty;
+      const ms = timestamp(event.timestamp);
+      const plan = Option.getOrNull(Schema.decodeUnknownOption(Plan)(event.payload));
+      // A fork's leading burst re-stamps its parent's events, including their plans.
+      const copied = copyAnchor !== null && ms !== null && ms - copyAnchor < 1000;
+
+      if (copyAnchor !== null && ms !== null) copyAnchor = copied ? ms : null;
+
+      const hints =
+        ms !== null && plan !== null && !copied
+          ? [{ timestamp: ms, plan: plan.rate_limits.plan_type }]
+          : [];
 
       // Codex also emits token_count events without usage (for example, rate-limit updates).
-      if (usage.info === null) return empty;
-      const ms = timestamp(event.timestamp);
+      if (usage.info === null) return { ...empty, hints };
 
       if (ms === null) return skipped;
       const count = usage.info.last_token_usage;
       const signature = JSON.stringify([count, usage.info.total_token_usage ?? null]);
 
-      if (signature === lastSignature) return empty;
+      if (signature === lastSignature) return { ...empty, hints };
       lastSignature = signature;
 
       // Forks contain a leading re-stamped burst of their parent's history.
       // This is a heuristic, so expose its use rather than claiming exact coverage.
-      if (copyAnchor !== null) {
-        if (ms - copyAnchor < 1000) {
-          copyAnchor = ms;
-
-          return {
-            ...empty,
-            skipped: 1,
-            warnings: ["Codex fork-history copies were excluded using T3's timing heuristic."],
-          };
-        }
-
-        copyAnchor = null;
-      }
+      if (copied)
+        return {
+          ...empty,
+          skipped: 1,
+          warnings: ["Codex fork-history copies were excluded using T3's timing heuristic."],
+        };
 
       const cacheRead = count.cached_input_tokens ?? 0;
       const cacheWrite = count.cache_write_input_tokens ?? 0;
@@ -150,6 +159,7 @@ export function codexParser(file: string): TranscriptParser {
 
       return {
         ...empty,
+        hints,
         records: [
           {
             provider: "codex",
