@@ -1,6 +1,6 @@
 import { Option, Schema } from "effect";
 
-import type { UsageRecord } from "../model.ts";
+import { RepositoryReference, type UsageRecord } from "../model.ts";
 import { decodeJson, empty, malformed, skipped, type TranscriptParser } from "./shared.ts";
 
 /** Allowlisted Copilot accounting attributes, shared by JSONL and SQLite decoding. */
@@ -54,7 +54,7 @@ const Header = Schema.Struct({
 });
 
 interface AttributionSpan {
-  readonly repository: string | null;
+  readonly repository: UsageRecord["repository"];
   readonly parent: string | undefined;
 }
 
@@ -62,6 +62,19 @@ interface Candidate {
   readonly record: UsageRecord;
   readonly spanKey: string | undefined;
   readonly isSpan: boolean;
+}
+
+function repositoryReference(attributes: typeof CopilotAttributes.Type): UsageRecord["repository"] {
+  const repository = attributes["github.copilot.git.repository"];
+
+  if (repository !== undefined)
+    return /^[A-Za-z0-9-]+\/(?!\.{1,2}$)[A-Za-z0-9_.-]+$/.test(repository)
+      ? RepositoryReference.Identity({ value: repository })
+      : RepositoryReference.Remote({ value: repository });
+
+  const remote = attributes["copilot_chat.repo.remote_url"];
+
+  return remote === undefined ? null : RepositoryReference.Remote({ value: remote });
 }
 
 /** Buffers one Copilot source to resolve out-of-order spans before request deduplication. */
@@ -111,8 +124,7 @@ export function copilotParser(file: string): TranscriptParser {
       if (exportedSpan !== null && spanKey !== undefined) {
         const parent = exportedSpan.parentSpanContext;
         spans.set(spanKey, {
-          repository:
-            a["github.copilot.git.repository"] ?? a["copilot_chat.repo.remote_url"] ?? null,
+          repository: repositoryReference(a),
           parent:
             parent !== undefined
               ? parent.traceId === span.traceId
@@ -153,7 +165,7 @@ export function copilotParser(file: string): TranscriptParser {
         timestamp: ms,
         model: a["gen_ai.response.model"] ?? a["gen_ai.request.model"] ?? "unknown",
         cwd: null,
-        repository: a["github.copilot.git.repository"] ?? a["copilot_chat.repo.remote_url"] ?? null,
+        repository: repositoryReference(a),
         tokens: { input: input - cacheRead - cacheWrite, output, cacheRead, cacheWrite },
       };
 
