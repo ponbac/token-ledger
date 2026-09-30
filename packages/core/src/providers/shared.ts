@@ -1,9 +1,16 @@
 import { Schema } from "effect";
 import type { UsageRecord } from "../model.ts";
 
+/** A billing plan the provider reported at an instant; never tied to a session. */
+export interface PlanHint {
+  readonly timestamp: number;
+  readonly plan: string;
+}
+
 /** Internal parser output distinguishes unrelated lines from lost usage. */
 export interface ParseResult {
   readonly records: readonly UsageRecord[];
+  readonly hints: readonly PlanHint[];
   readonly malformed: number;
   readonly skipped: number;
   readonly warnings: readonly string[];
@@ -16,7 +23,13 @@ export interface TranscriptParser {
 }
 
 /** An unrelated or already-counted provider event. */
-export const empty: ParseResult = { records: [], malformed: 0, skipped: 0, warnings: [] };
+export const empty: ParseResult = {
+  records: [],
+  hints: [],
+  malformed: 0,
+  skipped: 0,
+  warnings: [],
+};
 
 /** A recognized usage event that could not be normalized. */
 export const skipped: ParseResult = { ...empty, skipped: 1 };
