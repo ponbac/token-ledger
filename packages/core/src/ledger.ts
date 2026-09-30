@@ -12,6 +12,7 @@ import {
   Stream,
 } from "effect";
 
+import { dayWindow } from "./calendar.ts";
 import {
   type Coverage,
   ReportRequest,
@@ -56,7 +57,7 @@ export class Ledger extends Context.Service<
             () =>
               new InvalidRequest({
                 message:
-                  "Expected an ordered inclusive UTC day window and valid sources, mappings, and prices.",
+                  "Expected an ordered inclusive day window, a named time zone, and valid sources, mappings, and prices.",
               }),
           ),
         );
@@ -81,8 +82,7 @@ export class Ledger extends Context.Service<
         const seen = new Set<string>();
         const visitedFiles = new Set<string>();
         const coverage: Coverage[] = [];
-        const since = Date.parse(`${request.since}T00:00:00Z`);
-        const until = Date.parse(`${request.until}T00:00:00Z`) + 86_400_000;
+        const window = dayWindow(request.since, request.until, request.timeZone);
 
         for (const source of request.sources) {
           let files = 0;
@@ -102,12 +102,9 @@ export class Ledger extends Context.Service<
             for (const warning of result.warnings) warnings.add(warning);
 
             for (const record of result.records) {
-              if (
-                record.timestamp < since ||
-                record.timestamp >= until ||
-                totalTokens(record.tokens) === 0
-              )
-                continue;
+              const day = window.dayOf(record.timestamp);
+
+              if (day === undefined || totalTokens(record.tokens) === 0) continue;
               const id = `${record.provider}:${record.id}`;
 
               if (seen.has(id)) {
@@ -117,7 +114,6 @@ export class Ledger extends Context.Service<
 
               seen.add(id);
               const project = yield* resolveProject(record, source.project);
-              const day = new Date(record.timestamp).toISOString().slice(0, 10);
               const key = JSON.stringify([project, day, record.provider, record.model]);
               const previous = rows.get(key);
 
@@ -247,9 +243,10 @@ export class Ledger extends Context.Service<
         }
 
         return UsageReport.make({
-          version: 1,
+          version: 2,
           since: request.since,
           until: request.until,
+          timeZone: request.timeZone.id,
           currency: "USD",
           costBasis: "api-equivalent",
           pricing: {

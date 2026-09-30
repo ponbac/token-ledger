@@ -11,7 +11,7 @@ import {
   type Source,
 } from "@token-ledger/core/model";
 import { loadPrices } from "@token-ledger/core/pricing";
-import { Clock, Config, Console, Effect, FileSystem, Match, Option, Path, Schema } from "effect";
+import { Config, Console, DateTime, Effect, FileSystem, Match, Option, Path, Schema } from "effect";
 import { Command, Flag } from "effect/unstable/cli";
 import { FetchHttpClient } from "effect/unstable/http";
 
@@ -25,18 +25,37 @@ const home = homedir();
 
 const workingDirectory = process.cwd();
 
+// Node reports an unset or unknown TZ as undefined or Etc/Unknown; neither names a zone.
+const systemTimeZone = Effect.sync(() => Intl.DateTimeFormat().resolvedOptions().timeZone).pipe(
+  Effect.flatMap(Schema.decodeUnknownEffect(Schema.TimeZoneNamedFromString)),
+  Effect.mapError(
+    () =>
+      new CliError({
+        message:
+          "Cannot determine the system time zone; pass --time-zone, such as --time-zone Europe/Stockholm.",
+      }),
+  ),
+);
+
 const report = Command.make(
   "report",
   {
     since: Flag.String("since").pipe(
       Flag.withSchema(Day),
       Flag.optional,
-      Flag.withDescription("First UTC day, inclusive; defaults to this month"),
+      Flag.withDescription("First local day, inclusive; defaults to the start of this month"),
     ),
     until: Flag.String("until").pipe(
       Flag.withSchema(Day),
       Flag.optional,
-      Flag.withDescription("Last UTC day, inclusive; defaults to today"),
+      Flag.withDescription("Last local day, inclusive; defaults to today"),
+    ),
+    timeZone: Flag.String("time-zone").pipe(
+      Flag.withSchema(Schema.TimeZoneNamedFromString),
+      Flag.optional,
+      Flag.withDescription(
+        "IANA time zone for days and the window, such as Europe/Stockholm; defaults to the system zone",
+      ),
     ),
     provider: Flag.Literals("provider", ["all", "codex", "claude", "grok", "copilot"]).pipe(
       Flag.withDefault("all"),
@@ -72,8 +91,10 @@ const report = Command.make(
   Effect.fn("CLI.report")(function* (flags) {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const now = yield* Clock.currentTimeMillis;
-    const today = new Date(now).toISOString().slice(0, 10);
+
+    const timeZone = Option.isSome(flags.timeZone) ? flags.timeZone.value : yield* systemTimeZone;
+
+    const today = DateTime.formatIsoDate(DateTime.setZone(yield* DateTime.now, timeZone));
 
     const expand = (value: string, base = workingDirectory) =>
       path.resolve(base, value.startsWith("~/") ? path.join(home, value.slice(2)) : value);
@@ -180,6 +201,7 @@ const report = Command.make(
     const request = yield* ReportRequest.makeEffect({
       since: Option.getOrElse(flags.since, () => `${today.slice(0, 7)}-01`),
       until: Option.getOrElse(flags.until, () => today),
+      timeZone,
       sources,
       projects,
       pricing,

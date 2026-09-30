@@ -2,7 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import { NodeServices } from "@effect/platform-node";
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, FileSystem, Layer, Path, Result, Schema } from "effect";
+import { DateTime, Effect, FileSystem, Layer, Path, Result, Schema } from "effect";
 
 import { Ledger } from "./ledger.ts";
 import { PriceBook, ReportRequest, UsageReport, totalTokens, type Source } from "./model.ts";
@@ -52,6 +52,7 @@ function request(sources: readonly Source[]) {
   return ReportRequest.make({
     since: "2026-09-01",
     until: "2026-09-30",
+    timeZone: DateTime.zoneMakeNamedUnsafe("UTC"),
     sources,
     projects: [],
     pricing: prices,
@@ -637,30 +638,47 @@ describe("Ledger reports through the public interface", () => {
     }).pipe(Effect.provide(runtime)),
   );
 
-  it.effect("includes the last UTC day and detects overlapping source paths", () =>
+  it.effect("windows and groups by local days and detects overlapping source paths", () =>
     Effect.gen(function* () {
       const { write, root } = yield* fixture();
 
+      // 23:59:59.999 and 00:00 in Stockholm, both on September 22 in UTC.
       const file = yield* write("sessions/only.jsonl", [
         JSON.stringify({ type: "session_meta", payload: { id: "boundary" } }),
         JSON.stringify({ type: "turn_context", payload: { model: "test-model" } }),
-        codexUsage("23:59:59.999"),
+        codexUsage("21:59:59.999", 100, 20, 100),
+        codexUsage("22:00:00", 100, 20, 200),
       ]);
 
       const ledger = yield* Ledger;
 
-      const report = yield* ledger.report({
+      const input = {
         ...request([
           { provider: "codex", path: root },
           { provider: "codex", path: file },
         ]),
         since: "2026-09-22",
         until: "2026-09-22",
-      });
+        timeZone: DateTime.zoneMakeNamedUnsafe("Europe/Stockholm"),
+      };
 
-      assert.strictEqual(report.rows[0]?.records, 1);
+      const report = yield* ledger.report(input);
+      assert.strictEqual(report.timeZone, "Europe/Stockholm");
+      assert.deepStrictEqual(
+        report.rows.map((row) => [row.day, row.records]),
+        [["2026-09-22", 1]],
+      );
       assert.strictEqual(report.coverage[1]?.files, 0);
       assert.isTrue((report.coverage[1]?.warnings.length ?? 0) > 0);
+
+      const extended = yield* ledger.report({ ...input, until: "2026-09-23" });
+      assert.deepStrictEqual(
+        extended.rows.map((row) => [row.day, row.records]),
+        [
+          ["2026-09-22", 1],
+          ["2026-09-23", 1],
+        ],
+      );
     }).pipe(Effect.provide(runtime)),
   );
 });

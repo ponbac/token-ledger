@@ -112,7 +112,7 @@ export function table(report: UsageReport, columns = 120, colorful = false): str
   const number = new Intl.NumberFormat("en-US");
 
   if (projectCount === 0)
-    return `No observed usage from ${report.since} through ${report.until} (UTC).`;
+    return `No observed usage from ${report.since} through ${report.until} (${report.timeZone}).`;
 
   const numericWidths = headings
     .slice(1)
@@ -186,7 +186,7 @@ export function table(report: UsageReport, columns = 120, colorful = false): str
   }
 
   return [
-    `${paint(["bold", "cyan"], colorful ? "⚡ Token Ledger" : "Token Ledger")} · ${paint("dim", `${report.since} through ${report.until} (UTC)`)}`,
+    `${paint(["bold", "cyan"], colorful ? "⚡ Token Ledger" : "Token Ledger")} · ${paint("dim", `${report.since} through ${report.until} (${report.timeZone})`)}`,
     "",
     output.toString(),
     "",
