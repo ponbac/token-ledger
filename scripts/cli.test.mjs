@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -9,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { Schema } from "effect";
 
 import { UsageReport } from "../packages/core/src/model.ts";
+import { SyncMachine, SyncPayload } from "../packages/core/src/sync.ts";
 
 const packageDirectory = fileURLToPath(new URL("../dist/npm", import.meta.url));
 
@@ -34,6 +36,12 @@ const decodeManifest = Schema.decodeUnknownSync(
 );
 
 const decodeReport = Schema.decodeUnknownSync(Schema.fromJsonString(UsageReport));
+
+const decodePayload = Schema.decodeUnknownSync(Schema.fromJsonString(SyncPayload));
+
+const decodeMachine = Schema.decodeUnknownSync(Schema.fromJsonString(SyncMachine));
+
+const decodeAddress = Schema.decodeUnknownSync(Schema.Struct({ port: Schema.Number }));
 
 await test("npm artifact installs offline and exports reports with correct coverage and exit codes", () => {
   const directory = mkdtempSync(join(tmpdir(), "token-ledger-cli-"));
@@ -185,6 +193,144 @@ await test("npm artifact installs offline and exports reports with correct cover
     assert.equal(invalid.status, 1);
     assert.match(invalid.stderr + invalid.stdout, /Cannot read or decode configuration/);
   } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+await test("sync uploads an identical payload on every run and exits 4 when refused", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "token-ledger-sync-"));
+  const token = "toki_fixture_secret";
+  /** @type {{ method: string | undefined; url: string | undefined; authorization: string | undefined; body: string }[]} */
+  const requests = [];
+  let status = 200;
+
+  const server = createServer((request, response) => {
+    let body = "";
+    request.setEncoding("utf8");
+    request.on("data", (chunk) => {
+      body += chunk;
+    });
+    request.on("end", () => {
+      requests.push({
+        method: request.method,
+        url: request.url,
+        authorization: request.headers.authorization,
+        body,
+      });
+      response.writeHead(status, { "content-type": "application/json" });
+      response.end(JSON.stringify(status === 200 ? { storedBuckets: 1 } : {}));
+    });
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(undefined)));
+
+  try {
+    const history = join(directory, "history.jsonl");
+
+    writeFileSync(
+      history,
+      [
+        JSON.stringify({ type: "session_meta", payload: { id: "fixture-session" } }),
+        JSON.stringify({ type: "turn_context", payload: { model: "fixture-model" } }),
+        JSON.stringify({
+          type: "event_msg",
+          timestamp: "2026-09-22T12:00:00Z",
+          payload: {
+            type: "token_count",
+            info: { last_token_usage: { input_tokens: 100, output_tokens: 20 } },
+          },
+        }),
+      ].join("\n") + "\n",
+    );
+
+    const configuration = join(directory, "token-ledger.json");
+
+    writeFileSync(
+      configuration,
+      JSON.stringify({ sources: [{ provider: "codex", path: history }] }),
+    );
+
+    /** @param {string[]} args @returns {Promise<{ status: number | null; stdout: string; stderr: string }>} */
+    const run = (args) =>
+      new Promise((resolve) => {
+        const child = spawn(
+          process.execPath,
+          [
+            join(packageDirectory, "dist/main.js"),
+            "sync",
+            "--config",
+            configuration,
+            "--offline",
+            "--since",
+            "2026-09-22",
+            "--until",
+            "2026-09-22",
+            "--time-zone",
+            "Europe/Stockholm",
+            ...args,
+          ],
+          {
+            cwd: directory,
+            env: {
+              ...process.env,
+              HOME: directory,
+              XDG_CACHE_HOME: directory,
+              XDG_CONFIG_HOME: join(directory, "config"),
+              TOKEN_LEDGER_SERVER: `http://127.0.0.1:${decodeAddress(server.address()).port}`,
+              TOKI_API_TOKEN: token,
+            },
+          },
+        );
+
+        let stdout = "";
+        let stderr = "";
+        child.stdout.setEncoding("utf8").on("data", (chunk) => {
+          stdout += chunk;
+        });
+        child.stderr.setEncoding("utf8").on("data", (chunk) => {
+          stderr += chunk;
+        });
+        child.on("close", (code) => resolve({ status: code, stdout, stderr }));
+      });
+
+    const first = await run([]);
+
+    assert.equal(first.status, 0, first.stderr);
+
+    const machine = decodeMachine(
+      readFileSync(join(directory, "config/token-ledger/machine.json"), "utf8"),
+    );
+
+    assert.equal(requests[0]?.method, "PUT");
+    assert.equal(requests[0]?.url, `/ai-usage/machines/${machine.id}/usage`);
+    assert.equal(requests[0]?.authorization, `Bearer ${token}`);
+
+    const payload = decodePayload(requests[0]?.body ?? "");
+
+    assert.deepEqual(payload.machine, machine);
+    assert.equal(payload.buckets.length, 1);
+    assert.match(first.stdout, /server stored 1/);
+
+    const second = await run([]);
+
+    assert.equal(second.status, 0, second.stderr);
+    assert.equal(requests[1]?.body, requests[0]?.body);
+
+    const dryRun = await run(["--dry-run"]);
+
+    assert.equal(dryRun.status, 0, dryRun.stderr);
+    assert.equal(requests.length, 2);
+    assert.deepEqual(decodePayload(dryRun.stdout), payload);
+
+    status = 401;
+    const refused = await run([]);
+
+    assert.equal(refused.status, 4);
+
+    for (const output of [first, second, dryRun, refused])
+      assert.doesNotMatch(output.stdout + output.stderr, new RegExp(token));
+  } finally {
+    server.close();
     rmSync(directory, { recursive: true, force: true });
   }
 });

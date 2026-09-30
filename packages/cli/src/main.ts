@@ -2,22 +2,38 @@
 import { homedir } from "node:os";
 
 import { NodeRuntime, NodeServices } from "@effect/platform-node";
+import { addDays } from "@token-ledger/core/calendar";
 import { Ledger } from "@token-ledger/core/ledger";
 import {
   Configuration,
   Day,
   PriceBook,
+  ProjectName,
+  type Provider,
   ReportRequest,
   type Source,
 } from "@token-ledger/core/model";
 import { loadPrices } from "@token-ledger/core/pricing";
-import { Config, Console, DateTime, Effect, FileSystem, Match, Option, Path, Schema } from "effect";
+import {
+  Config,
+  Console,
+  DateTime,
+  Effect,
+  FileSystem,
+  Match,
+  Option,
+  Path,
+  Result,
+  Schema,
+} from "effect";
 import { Command, Flag } from "effect/unstable/cli";
 import { FetchHttpClient } from "effect/unstable/http";
 
 import metadata from "../package.json" with { type: "json" };
 
-import { csv, table } from "./format.ts";
+import { csv, syncSummary, table } from "./format.ts";
+import { ServerUrl, loadMachine, loadSyncSettings, settingsDirectory } from "./settings.ts";
+import { upload } from "./upload.ts";
 
 class CliError extends Schema.TaggedError<CliError>()("CliError", { message: Schema.String }) {}
 
@@ -37,13 +53,13 @@ const systemTimeZone = Effect.sync(() => Intl.DateTimeFormat().resolvedOptions()
   ),
 );
 
-const report = Command.make(
-  "report",
-  {
+/** Flags selecting usage, shared by `report` and `sync`. */
+function usageFlags(sinceDefault: string, strict: string) {
+  return {
     since: Flag.String("since").pipe(
       Flag.withSchema(Day),
       Flag.optional,
-      Flag.withDescription("First local day, inclusive; defaults to the start of this month"),
+      Flag.withDescription(`First local day, inclusive; defaults to ${sinceDefault}`),
     ),
     until: Flag.String("until").pipe(
       Flag.withSchema(Day),
@@ -60,17 +76,180 @@ const report = Command.make(
     provider: Flag.Literals("provider", ["all", "codex", "claude", "grok", "copilot"]).pipe(
       Flag.withDefault("all"),
     ),
-    source: Flag.String("source").pipe(
-      Flag.optional,
-      Flag.withDescription("Read one file or directory; requires --provider"),
-    ),
     project: Flag.String("project").pipe(
+      Flag.withSchema(ProjectName),
       Flag.optional,
       Flag.withDescription("Assign all selected usage to this project"),
     ),
     config: Flag.String("config").pipe(
       Flag.optional,
       Flag.withDescription("JSON config; otherwise reads ./token-ledger.json when present"),
+    ),
+    offline: Flag.Boolean("offline").pipe(
+      Flag.withDefault(false),
+      Flag.withDescription("Use only cached and configured prices"),
+    ),
+    strict: Flag.Boolean("strict").pipe(Flag.withDefault(false), Flag.withDescription(strict)),
+  };
+}
+
+/** Parsed usage flags. */
+interface UsageOptions {
+  readonly since: Option.Option<string>;
+  readonly until: Option.Option<string>;
+  readonly timeZone: Option.Option<DateTime.TimeZone.Named>;
+  readonly provider: "all" | Provider;
+  readonly source: Option.Option<string>;
+  readonly project: Option.Option<string>;
+  readonly config: Option.Option<string>;
+  readonly offline: boolean;
+}
+
+/** Resolves configuration, discovery, pricing, and the local-day window into a ledger request. */
+const usageRequest = Effect.fn("CLI.usageRequest")(function* (
+  flags: UsageOptions,
+  defaultSince: (today: Day) => Day,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+
+  const timeZone = Option.isSome(flags.timeZone) ? flags.timeZone.value : yield* systemTimeZone;
+
+  const today = DateTime.formatIsoDate(DateTime.setZone(yield* DateTime.now, timeZone));
+
+  const expand = (value: string, base = workingDirectory) =>
+    path.resolve(base, value.startsWith("~/") ? path.join(home, value.slice(2)) : value);
+
+  const configFile = expand(Option.getOrElse(flags.config, () => "token-ledger.json"));
+  let configuration: Configuration = {};
+
+  if (Option.isSome(flags.config) || (yield* fs.exists(configFile))) {
+    configuration = yield* fs.readFileString(configFile).pipe(
+      Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(Configuration))),
+      Effect.mapError(
+        () =>
+          new CliError({
+            message: "Cannot read or decode configuration. See token-ledger config-example.",
+          }),
+      ),
+    );
+  }
+
+  const codexHome = yield* Config.String("CODEX_HOME").pipe(
+    Config.withDefault(path.join(home, ".codex")),
+  );
+
+  const claudeHome = yield* Config.String("CLAUDE_CONFIG_DIR").pipe(
+    Config.withDefault(path.join(home, ".claude")),
+  );
+
+  const grokHome = yield* Config.String("GROK_HOME").pipe(
+    Config.withDefault(path.join(home, ".grok")),
+  );
+
+  const copilotHome = yield* Config.String("COPILOT_HOME").pipe(
+    Config.withDefault(path.join(home, ".copilot")),
+  );
+
+  const copilotFile = yield* Config.String("COPILOT_OTEL_FILE_EXPORTER_PATH").pipe(Config.option);
+
+  const defaults: Source[] = [
+    { provider: "codex", path: path.join(expand(codexHome), "sessions") },
+    { provider: "codex", path: path.join(expand(codexHome), "archived_sessions") },
+    { provider: "claude", path: path.join(expand(claudeHome), "projects") },
+    { provider: "grok", path: path.join(expand(grokHome), "sessions") },
+    {
+      provider: "copilot",
+      path: Option.match(copilotFile, {
+        onNone: () => path.join(expand(copilotHome), "otel"),
+        onSome: (value) => expand(value),
+      }),
+    },
+  ];
+
+  let sources: readonly Source[] =
+    configuration.sources === undefined
+      ? defaults
+      : configuration.sources.map((source) => ({
+          ...source,
+          path: expand(source.path, path.dirname(configFile)),
+        }));
+
+  if (flags.provider !== "all")
+    sources = sources.filter((source) => source.provider === flags.provider);
+
+  if (Option.isSome(flags.source)) {
+    if (flags.provider === "all")
+      return yield* new CliError({
+        message: "--source requires --provider codex, claude, grok, or copilot.",
+      });
+    sources = [{ provider: flags.provider, path: expand(flags.source.value) }];
+  }
+
+  if (Option.isSome(flags.project)) {
+    const project = flags.project.value;
+    sources = sources.map((source) => ({
+      provider: source.provider,
+      path: source.path,
+      project,
+    }));
+  }
+
+  const projects = (configuration.projects ?? []).map((mapping) => ({
+    ...mapping,
+    paths: mapping.paths.map((prefix) => expand(prefix, path.dirname(configFile))),
+  }));
+
+  const cacheRoot = yield* Config.String("XDG_CACHE_HOME").pipe(
+    Config.withDefault(path.join(home, ".cache")),
+  );
+
+  const basePrices = yield* loadPrices(
+    path.join(expand(cacheRoot), "token-ledger", "prices.json"),
+    flags.offline,
+  );
+
+  const pricing =
+    configuration.prices === undefined
+      ? basePrices
+      : PriceBook.make({
+          ...basePrices,
+          status: "custom",
+          source: `${basePrices.source}; configuration overrides`,
+          prices: { ...basePrices.prices, ...configuration.prices },
+        });
+
+  if (pricing.status === "unavailable")
+    yield* Console.error(
+      "Pricing unavailable: unknown rates remain unpriced. Configure prices or rerun online.",
+    );
+
+  const request = yield* ReportRequest.makeEffect({
+    since: Option.getOrElse(flags.since, () => defaultSince(today)),
+    until: Option.getOrElse(flags.until, () => today),
+    timeZone,
+    sources,
+    projects,
+    pricing,
+  }).pipe(
+    Effect.mapError(
+      () => new CliError({ message: "Invalid usage inputs; --since must not follow --until." }),
+    ),
+  );
+
+  return { request, today };
+});
+
+const report = Command.make(
+  "report",
+  {
+    ...usageFlags(
+      "the start of this month",
+      "Exit 2 for missing/partial sources or unpriced usage",
+    ),
+    source: Flag.String("source").pipe(
+      Flag.optional,
+      Flag.withDescription("Read one file or directory; requires --provider"),
     ),
     format: Flag.Literals("format", ["table", "json", "csv"]).pipe(Flag.withDefault("table")),
     json: Flag.Boolean("json").pipe(
@@ -79,138 +258,9 @@ const report = Command.make(
         "Emit structured JSON to stdout (overrides --format); diagnostics use stderr",
       ),
     ),
-    offline: Flag.Boolean("offline").pipe(
-      Flag.withDefault(false),
-      Flag.withDescription("Use only cached and configured prices"),
-    ),
-    strict: Flag.Boolean("strict").pipe(
-      Flag.withDefault(false),
-      Flag.withDescription("Exit 2 for missing/partial sources or unpriced usage"),
-    ),
   },
   Effect.fn("CLI.report")(function* (flags) {
-    const fs = yield* FileSystem.FileSystem;
-    const path = yield* Path.Path;
-
-    const timeZone = Option.isSome(flags.timeZone) ? flags.timeZone.value : yield* systemTimeZone;
-
-    const today = DateTime.formatIsoDate(DateTime.setZone(yield* DateTime.now, timeZone));
-
-    const expand = (value: string, base = workingDirectory) =>
-      path.resolve(base, value.startsWith("~/") ? path.join(home, value.slice(2)) : value);
-
-    const configFile = expand(Option.getOrElse(flags.config, () => "token-ledger.json"));
-    let configuration: Configuration = {};
-
-    if (Option.isSome(flags.config) || (yield* fs.exists(configFile))) {
-      configuration = yield* fs.readFileString(configFile).pipe(
-        Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(Configuration))),
-        Effect.mapError(
-          () =>
-            new CliError({
-              message: "Cannot read or decode configuration. See token-ledger config-example.",
-            }),
-        ),
-      );
-    }
-
-    const codexHome = yield* Config.String("CODEX_HOME").pipe(
-      Config.withDefault(path.join(home, ".codex")),
-    );
-
-    const claudeHome = yield* Config.String("CLAUDE_CONFIG_DIR").pipe(
-      Config.withDefault(path.join(home, ".claude")),
-    );
-
-    const grokHome = yield* Config.String("GROK_HOME").pipe(
-      Config.withDefault(path.join(home, ".grok")),
-    );
-
-    const copilotHome = yield* Config.String("COPILOT_HOME").pipe(
-      Config.withDefault(path.join(home, ".copilot")),
-    );
-
-    const copilotFile = yield* Config.String("COPILOT_OTEL_FILE_EXPORTER_PATH").pipe(Config.option);
-
-    const defaults: Source[] = [
-      { provider: "codex", path: path.join(expand(codexHome), "sessions") },
-      { provider: "codex", path: path.join(expand(codexHome), "archived_sessions") },
-      { provider: "claude", path: path.join(expand(claudeHome), "projects") },
-      { provider: "grok", path: path.join(expand(grokHome), "sessions") },
-      {
-        provider: "copilot",
-        path: Option.match(copilotFile, {
-          onNone: () => path.join(expand(copilotHome), "otel"),
-          onSome: (value) => expand(value),
-        }),
-      },
-    ];
-
-    let sources: readonly Source[] =
-      configuration.sources === undefined
-        ? defaults
-        : configuration.sources.map((source) => ({
-            ...source,
-            path: expand(source.path, path.dirname(configFile)),
-          }));
-
-    if (flags.provider !== "all")
-      sources = sources.filter((source) => source.provider === flags.provider);
-
-    if (Option.isSome(flags.source)) {
-      if (flags.provider === "all")
-        return yield* new CliError({
-          message: "--source requires --provider codex, claude, grok, or copilot.",
-        });
-      sources = [{ provider: flags.provider, path: expand(flags.source.value) }];
-    }
-
-    if (Option.isSome(flags.project)) {
-      const project = flags.project.value;
-      sources = sources.map((source) => ({
-        provider: source.provider,
-        path: source.path,
-        project,
-      }));
-    }
-
-    const projects = (configuration.projects ?? []).map((mapping) => ({
-      ...mapping,
-      paths: mapping.paths.map((prefix) => expand(prefix, path.dirname(configFile))),
-    }));
-
-    const cacheRoot = yield* Config.String("XDG_CACHE_HOME").pipe(
-      Config.withDefault(path.join(home, ".cache")),
-    );
-
-    const basePrices = yield* loadPrices(
-      path.join(expand(cacheRoot), "token-ledger", "prices.json"),
-      flags.offline,
-    );
-
-    const pricing =
-      configuration.prices === undefined
-        ? basePrices
-        : PriceBook.make({
-            ...basePrices,
-            status: "custom",
-            source: `${basePrices.source}; configuration overrides`,
-            prices: { ...basePrices.prices, ...configuration.prices },
-          });
-
-    const request = yield* ReportRequest.makeEffect({
-      since: Option.getOrElse(flags.since, () => `${today.slice(0, 7)}-01`),
-      until: Option.getOrElse(flags.until, () => today),
-      timeZone,
-      sources,
-      projects,
-      pricing,
-    }).pipe(
-      Effect.mapError(
-        () => new CliError({ message: "Invalid report inputs; --since must not follow --until." }),
-      ),
-    );
-
+    const { request } = yield* usageRequest(flags, (today) => `${today.slice(0, 7)}-01`);
     const ledger = yield* Ledger;
     const result = yield* ledger.report(request);
 
@@ -229,11 +279,6 @@ const report = Command.make(
 
     yield* Console.log(output);
 
-    if (pricing.status === "unavailable")
-      yield* Console.error(
-        "Pricing unavailable: unknown rates remain unpriced. Configure prices or rerun online.",
-      );
-
     for (const source of result.coverage) {
       if (source.status !== "ok" || source.warnings.length > 0)
         yield* Console.error(
@@ -250,6 +295,119 @@ const report = Command.make(
   }),
 ).pipe(
   Command.withDescription("Report local token consumption and API-equivalent cost by project"),
+);
+
+// Claude Code deletes transcripts after `cleanupPeriodDays`, 30 by default.
+const claudeRetentionDays = 30;
+
+const sync = Command.make(
+  "sync",
+  {
+    ...usageFlags(
+      "13 days before --until",
+      "Exit 2 without uploading for missing/partial sources or unpriced usage",
+    ),
+    server: Flag.String("server").pipe(
+      Flag.withSchema(ServerUrl),
+      Flag.withFallbackConfig(Config.schema(ServerUrl, "TOKEN_LEDGER_SERVER")),
+      Flag.optional,
+      Flag.withDescription("toki2 URL; otherwise TOKEN_LEDGER_SERVER or sync.json"),
+    ),
+    token: Flag.Redacted("token").pipe(
+      Flag.withFallbackConfig(Config.Redacted("TOKI_API_TOKEN")),
+      Flag.optional,
+      Flag.withDescription("toki2 API token; prefer TOKI_API_TOKEN or sync.json"),
+    ),
+    dryRun: Flag.Boolean("dry-run").pipe(
+      Flag.withDefault(false),
+      Flag.withDescription("Print the payload as JSON and upload nothing"),
+    ),
+  },
+  Effect.fn("CLI.sync")(function* (flags) {
+    const directory = yield* settingsDirectory;
+    const until = Option.getOrUndefined(flags.until);
+
+    // One file cannot stand in for a provider's history: the server would replace the rest.
+    const { request, today } = yield* usageRequest({ ...flags, source: Option.none() }, (today) =>
+      addDays(until ?? today, -13),
+    );
+
+    const machine = yield* loadMachine(directory);
+    const ledger = yield* Ledger;
+
+    const payload = yield* ledger.syncPayload(request, {
+      machine,
+      version: metadata.version,
+    });
+
+    for (const entry of payload.coverage) {
+      if (entry.status !== "ok")
+        yield* Console.error(
+          `${entry.provider}: ${entry.status}; ${entry.files} files, ${entry.unreadable} unreadable, ${entry.malformedLines} malformed lines, ${entry.skippedRecords} skipped records.${entry.status === "failed" ? " Not uploaded; the server keeps its stored usage." : ""}`,
+        );
+    }
+
+    if (
+      request.sources.some((source) => source.provider === "claude") &&
+      request.since < addDays(today, 1 - claudeRetentionDays)
+    )
+      yield* Console.error(
+        `Warning: the window starts more than ${claudeRetentionDays} days ago. Claude Code deletes older transcripts by default, and the server replaces the whole window, so pruned history would lower its totals.`,
+      );
+
+    const incomplete =
+      payload.coverage.some((entry) => entry.status !== "ok") ||
+      payload.buckets.some((bucket) => bucket.unpricedRecords > 0);
+
+    if (flags.dryRun) {
+      yield* Console.log(JSON.stringify(payload, null, 2));
+
+      if (flags.strict && incomplete) process.exitCode = 2;
+
+      return;
+    }
+
+    if (flags.strict && incomplete) {
+      yield* Console.error("Not syncing: coverage is incomplete or usage is unpriced (--strict).");
+      process.exitCode = 2;
+
+      return;
+    }
+
+    const settings =
+      Option.isSome(flags.server) && Option.isSome(flags.token)
+        ? {}
+        : yield* loadSyncSettings(directory);
+
+    const server = Option.orElse(flags.server, () => Option.fromUndefinedOr(settings.server));
+    const token = Option.orElse(flags.token, () => Option.fromUndefinedOr(settings.token));
+
+    if (Option.isNone(server) || Option.isNone(token))
+      return yield* new CliError({
+        message: `Missing ${Option.isNone(server) ? "server" : "API token"}: pass --server/--token, set TOKEN_LEDGER_SERVER/TOKI_API_TOKEN, or add it to ${directory}/sync.json.`,
+      });
+
+    const outcome = yield* upload(server.value, token.value, payload).pipe(Effect.result);
+
+    if (Result.isFailure(outcome)) {
+      yield* Console.error(outcome.failure.message);
+      process.exitCode = Match.value(outcome.failure).pipe(
+        Match.tag("SyncUnreachable", () => 3),
+        Match.tag("SyncUnauthorized", () => 4),
+        Match.tag("SyncUnsupportedVersion", () => 5),
+        Match.tag("SyncRejected", () => 6),
+        Match.exhaustive,
+      );
+
+      return;
+    }
+
+    yield* Console.log(syncSummary(payload, request, outcome.success));
+  }),
+).pipe(
+  Command.withDescription(
+    "Upload hourly usage buckets from this machine to toki2; the server replaces the window",
+  ),
 );
 
 const example = Command.make("config-example", {}, () =>
@@ -275,7 +433,7 @@ Command.make("token-ledger").pipe(
   Command.withDescription(
     "Local token accounting across coding agents. API estimates, not subscription bills.",
   ),
-  Command.withSubcommands([report, example]),
+  Command.withSubcommands([report, sync, example]),
   Command.run({ version: metadata.version }),
   Effect.provide(Ledger.layer),
   Effect.provide(NodeServices.layer),
