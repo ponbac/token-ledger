@@ -62,7 +62,7 @@ function mockSpawnerLayer(
 }
 
 it.layer(NodeServices.layer)("sync-reference-repos", (it) => {
-  it.effect("resolves the effect-smol tag from the root catalog", () =>
+  it.effect("resolves the effect tag from the root catalog", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
@@ -195,7 +195,7 @@ it.layer(NodeServices.layer)("sync-reference-repos", (it) => {
       assert.deepStrictEqual(addPlan.args, [
         "subtree",
         "add",
-        "--prefix=.repos/effect-smol",
+        "--prefix=.repos/effect",
         "https://github.com/Effect-TS/effect.git",
         "effect@4.0.0-beta.73",
         "--squash",
@@ -220,7 +220,7 @@ it.layer(NodeServices.layer)("sync-reference-repos", (it) => {
         "catalog:\n  effect: 4.0.0-beta.73\n",
       );
 
-      yield* syncReferenceRepos({ rootDir, repoId: "effect-smol" }).pipe(
+      yield* syncReferenceRepos({ rootDir, repoId: "effect" }).pipe(
         Effect.provide(mockSpawnerLayer(commands)),
       );
 
@@ -230,7 +230,7 @@ it.layer(NodeServices.layer)("sync-reference-repos", (it) => {
           args: [
             "subtree",
             "add",
-            "--prefix=.repos/effect-smol",
+            "--prefix=.repos/effect",
             "https://github.com/Effect-TS/effect.git",
             "effect@4.0.0-beta.73",
             "--squash",
@@ -251,7 +251,7 @@ it.layer(NodeServices.layer)("sync-reference-repos", (it) => {
         assert.fail(`Unexpected error: ${error._tag}`);
       }
       assert.equal(error.repoId, "missing");
-      assert.deepStrictEqual(error.expectedRepoIds, ["effect-smol", "alchemy-effect"]);
+      assert.deepStrictEqual(error.expectedRepoIds, ["effect", "alchemy-effect"]);
       assert.ok(!("cause" in error));
     }),
   );
@@ -270,7 +270,7 @@ it.layer(NodeServices.layer)("sync-reference-repos", (it) => {
         "catalog:\n  effect: 4.0.0-beta.73\n",
       );
 
-      const error = yield* syncReferenceRepos({ rootDir, repoId: "effect-smol" }).pipe(
+      const error = yield* syncReferenceRepos({ rootDir, repoId: "effect" }).pipe(
         Effect.provide(
           mockSpawnerLayer(
             commands,
