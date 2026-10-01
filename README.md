@@ -434,6 +434,9 @@ commit trailers. Refreshing either outer reference reapplies this Effect overlay
 refreshing T3 Code uses the root manifest's installed Effect version.
 The updater also removes a legacy nested snapshot reintroduced by upstream and
 reapplies the canonical paths in T3 Code's reference docs and updater files.
+Its own reference-sync command pins Effect to `effect@4.0.0`, independently of
+the vendored T3 runtime catalog; `--latest` still explicitly selects `main`.
+The parent updater reapplies this small source patch after outer T3 refreshes.
 
 ## License
 

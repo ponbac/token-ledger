@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
@@ -16,6 +16,7 @@ const nestedEffectReferenceFiles = [
   ".reference/t3code/AGENTS.md",
   ".reference/t3code/scripts/lib/reference-repos.ts",
   ".reference/t3code/scripts/sync-reference-repos.test.ts",
+  ".reference/t3code/scripts/sync-reference-repos.ts",
   ".reference/t3code/apps/server/src/pullRequest/pullRequestViewedFiles.ts",
 ];
 
@@ -88,6 +89,23 @@ const refreshNestedEffect = (/** @type {string} */ effectRevision) => {
     run(["add", referenceFile]);
   }
 
+  const patchArgs = [
+    "apply",
+    "--directory=.reference/t3code",
+    `${root}/scripts/t3code-effect-reference.patch`,
+  ];
+
+  const alreadyPatched = spawnSync("git", [...patchArgs, "--reverse", "--check"], {
+    cwd: root,
+    stdio: "ignore",
+  });
+
+  if (alreadyPatched.status !== 0) {
+    run([...patchArgs, "--check"]);
+    run(patchArgs);
+    run(["add", ...nestedEffectReferenceFiles]);
+  }
+
   if (!run(["diff", "--cached", "--name-only"], true).trim()) return;
 
   run([
@@ -96,7 +114,7 @@ const refreshNestedEffect = (/** @type {string} */ effectRevision) => {
     "-m",
     `chore(references): refresh nested Effect source to ${effectRevision}`,
     "-m",
-    `Deliberate Effect-source overlay and canonical reference paths inside the T3 Code subtree; unrelated files retain their imported revision.\n\nReference-prefix: ${nestedEffectPrefix}\nReference-upstream: ${effectRepository}\nReference-revision: ${effectRevision}\nReference-commit: ${upstreamCommit}`,
+    `Deliberate Effect-source overlay, canonical reference paths, and stable reference-sync pin inside the T3 Code subtree; unrelated files retain their imported revision.\n\nReference-prefix: ${nestedEffectPrefix}\nReference-upstream: ${effectRepository}\nReference-revision: ${effectRevision}\nReference-commit: ${upstreamCommit}`,
   ]);
 };
 

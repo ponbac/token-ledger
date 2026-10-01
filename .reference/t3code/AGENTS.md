@@ -149,6 +149,7 @@ Full glossary with file links: `docs/internals/glossary.md`
 ## Where code lives
 
 - `apps/server` - WebSocket, orchestration, providers, checkpointing. Effect-heavy: read `.repos/effect/LLMS.md` before writing Effect code.
+- `.repos/effect` is pinned to stable `effect@4.0.0` independently of this vendored T3 Code snapshot's prerelease runtime catalog. Ordinary reference sync preserves the pin; `--latest` explicitly selects `main`.
 - `apps/web` - React/Vite UI. `apps/desktop` wraps it, `apps/mobile` is React Native, `apps/marketing` is the site.
 - `packages/contracts` - Effect/Schema contracts plus small derived helpers. No heavy runtime logic.
 - `packages/shared` - shared runtime utils, subpath exports, no barrel.

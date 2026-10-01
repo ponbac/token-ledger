@@ -43,6 +43,10 @@ reports; an Effect CLI handles configuration, presentation, and process lifecycl
 - The updater removes the legacy nested snapshot when upstream reintroduces it
   and reapplies canonical Effect paths in the enclosing T3 Code reference docs
   and updater files.
+- The enclosing T3 Code updater pins the Effect reference to `effect@4.0.0`
+  independently of its runtime catalog; `--latest` explicitly selects `main`.
+  The parent updater reapplies `scripts/t3code-effect-reference.patch` after
+  outer refreshes, failing visibly if the scoped patch no longer applies.
 
 ## Scope
 
