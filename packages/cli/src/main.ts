@@ -12,8 +12,8 @@ import {
 } from "@token-ledger/core/model";
 import { loadPrices } from "@token-ledger/core/pricing";
 import { Clock, Config, Console, Effect, FileSystem, Match, Option, Path, Schema } from "effect";
-import { Command, Flag } from "effect/unstable/cli";
-import { FetchHttpClient } from "effect/unstable/http";
+import { Command, Flag } from "effect/cli";
+import { FetchHttpClient } from "effect/http";
 
 import metadata from "../package.json" with { type: "json" };
 
