@@ -30,8 +30,9 @@ reports; an Effect CLI handles configuration, presentation, and process lifecycl
 - References are read-only. Never import application code from them.
 - Prefer reference source over guessing APIs. Exclude references from builds and tests.
 - Refresh deliberately with `bun run reference:update effect <release-tag>` or
-  `bun run reference:update t3code <commit-or-branch>`. Update Effect packages and
-  its reference together; preserve upstream licenses and attribution.
+  `bun run reference:update t3code <commit-or-branch>`. Upgrade Effect packages first,
+  then refresh its reference in a separate PR stacked above the dependency upgrade;
+  preserve upstream licenses and attribution.
 
 ## Scope
 

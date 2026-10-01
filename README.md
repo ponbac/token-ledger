@@ -412,11 +412,14 @@ application checks and editor indexing, and marked vendored for GitHub statistic
 
 ```sh
 # Start with a clean working tree. Change the version deliberately when upgrading.
-bun run reference:update effect 'effect@4.0.0-rc.117'
+bun run reference:update effect 'effect@4.0.0'
 bun run reference:update t3code main
 ```
 
-Update Effect dependencies together with their reference. Git subtree commit
+Refresh the Effect reference after upgrading dependencies, in a separate PR stacked
+above the dependency upgrade. The Effect reference is pinned to `effect@4.0.0`
+(`67ba4e46a11ccda0b6761578bfd22c04ae00167d`) from
+[`Effect-TS/effect`](https://github.com/Effect-TS/effect). Git subtree commit
 messages record the imported revisions. The initial T3 reference is upstream
 `aff9318bf46beaf05cc7155b428d3f0b8711efd2`.
 
