@@ -27,7 +27,7 @@ reports; an Effect CLI handles configuration, presentation, and process lifecycl
   `LLMS.md` first, then relevant source, examples, and tests before writing Effect code.
 - `.reference/t3code`: token parsing, deduplication, and pricing reference. Start
   with `apps/server/src/usage/` and `packages/contracts/src/usage.ts`.
-- `.reference/t3code/.repos/effect-smol`: deliberate Effect-source overlay pinned
+- `.reference/t3code/.repos/effect`: deliberate Effect-source overlay pinned
   to the same release as `.reference/effect`; other T3 Code reference files retain
   their imported revision.
 - References are read-only. Never import application code from them.
@@ -40,6 +40,9 @@ reports; an Effect CLI handles configuration, presentation, and process lifecycl
   refresh. Use `bun run reference:update effect-t3code <release-tag>` to refresh
   only that snapshot. Its nested subtree history is absent from the outer squash,
   so the updater records provenance in commit trailers instead.
+- The updater removes the legacy nested snapshot when upstream reintroduces it
+  and reapplies canonical Effect paths in the enclosing T3 Code reference docs
+  and updater files.
 
 ## Scope
 

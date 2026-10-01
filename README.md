@@ -425,12 +425,15 @@ above the dependency upgrade. The Effect reference is pinned to `effect@4.0.0`
 messages record the imported revisions. The initial T3 reference is upstream
 `aff9318bf46beaf05cc7155b428d3f0b8711efd2`.
 
-The nested `.reference/t3code/.repos/effect-smol` snapshot has a deliberate overlay
-of the same stable Effect source. Other T3 Code reference files keep their imported
-revision. Its nested subtree history was omitted by the outer squash, so the updater
+The nested `.reference/t3code/.repos/effect` snapshot has a deliberate overlay
+of the same stable Effect source. Related T3 Code docs and updater paths use this
+canonical name; unrelated T3 Code reference files keep their imported revision.
+Its nested subtree history was omitted by the outer squash, so the updater
 replaces that snapshot and records its upstream URL, release tag, and commit in Git
 commit trailers. Refreshing either outer reference reapplies this Effect overlay;
 refreshing T3 Code uses the root manifest's installed Effect version.
+The updater also removes a legacy nested snapshot reintroduced by upstream and
+reapplies the canonical paths in T3 Code's reference docs and updater files.
 
 ## License
 

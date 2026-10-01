@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import manifest from "../package.json" with { type: "json" };
@@ -8,7 +8,16 @@ const root = fileURLToPath(new URL("../", import.meta.url));
 
 const effectRepository = "https://github.com/Effect-TS/effect.git";
 
-const nestedEffectPrefix = ".reference/t3code/.repos/effect-smol";
+const nestedEffectPrefix = ".reference/t3code/.repos/effect";
+
+const legacyNestedEffectPrefix = ".reference/t3code/.repos/effect-smol";
+
+const nestedEffectReferenceFiles = [
+  ".reference/t3code/AGENTS.md",
+  ".reference/t3code/scripts/lib/reference-repos.ts",
+  ".reference/t3code/scripts/sync-reference-repos.test.ts",
+  ".reference/t3code/apps/server/src/pullRequest/pullRequestViewedFiles.ts",
+];
 
 const repositories = new Map([
   ["effect", effectRepository],
@@ -42,26 +51,52 @@ if (run(["status", "--porcelain"], true).trim()) {
 
 const prefix = `.reference/${name}`;
 
-/** Replaces only the nested Effect snapshot and records its upstream provenance. */
+/** Refreshes the nested Effect snapshot and its canonical paths, recording provenance. */
 const refreshNestedEffect = (/** @type {string} */ effectRevision) => {
   run(["fetch", "--depth=1", effectRepository, effectRevision]);
 
   const upstreamCommit = run(["rev-parse", "FETCH_HEAD"], true).trim();
   const upstreamTree = run(["rev-parse", "FETCH_HEAD^{tree}"], true).trim();
 
-  if (existsSync(`${root}/${nestedEffectPrefix}`)) {
-    if (run(["rev-parse", `HEAD:${nestedEffectPrefix}`], true).trim() === upstreamTree) return;
+  if (existsSync(`${root}/${legacyNestedEffectPrefix}`)) {
+    run(["rm", "-r", "--quiet", legacyNestedEffectPrefix]);
+  }
+
+  const matchesUpstream =
+    existsSync(`${root}/${nestedEffectPrefix}`) &&
+    run(["rev-parse", `HEAD:${nestedEffectPrefix}`], true).trim() === upstreamTree;
+
+  if (!matchesUpstream && existsSync(`${root}/${nestedEffectPrefix}`)) {
     run(["rm", "-r", "--quiet", nestedEffectPrefix]);
   }
 
-  run(["read-tree", `--prefix=${nestedEffectPrefix}/`, "-u", upstreamCommit]);
+  if (!matchesUpstream) {
+    run(["read-tree", `--prefix=${nestedEffectPrefix}/`, "-u", upstreamCommit]);
+  }
+
+  for (const referenceFile of nestedEffectReferenceFiles) {
+    const referencePath = `${root}/${referenceFile}`;
+
+    if (!existsSync(referencePath)) continue;
+
+    const original = readFileSync(referencePath, "utf8");
+    const canonical = original.replaceAll("effect-smol", "effect");
+
+    if (canonical === original) continue;
+
+    writeFileSync(referencePath, canonical);
+    run(["add", referenceFile]);
+  }
+
+  if (!run(["diff", "--cached", "--name-only"], true).trim()) return;
+
   run([
     "commit",
     "--quiet",
     "-m",
     `chore(references): refresh nested Effect source to ${effectRevision}`,
     "-m",
-    `Deliberate Effect-source overlay inside the T3 Code subtree; its other files are unchanged.\n\nReference-prefix: ${nestedEffectPrefix}\nReference-upstream: ${effectRepository}\nReference-revision: ${effectRevision}\nReference-commit: ${upstreamCommit}`,
+    `Deliberate Effect-source overlay and canonical reference paths inside the T3 Code subtree; unrelated files retain their imported revision.\n\nReference-prefix: ${nestedEffectPrefix}\nReference-upstream: ${effectRepository}\nReference-revision: ${effectRevision}\nReference-commit: ${upstreamCommit}`,
   ]);
 };
 
