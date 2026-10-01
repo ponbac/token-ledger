@@ -16,7 +16,7 @@ import {
 } from "./sync-reference-repos.ts";
 
 const encoder = new TextEncoder();
-const effectSmol = referenceRepos[0]!;
+const effectReference = referenceRepos[0]!;
 const alchemyEffect = referenceRepos[1]!;
 
 function mockHandle(
@@ -62,7 +62,7 @@ function mockSpawnerLayer(
 }
 
 it.layer(NodeServices.layer)("sync-reference-repos", (it) => {
-  it.effect("resolves the effect-smol tag from the root catalog", () =>
+  it.effect("keeps the stable Effect reference pin when the runtime catalog is a prerelease", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
@@ -75,8 +75,8 @@ it.layer(NodeServices.layer)("sync-reference-repos", (it) => {
       );
 
       assert.equal(
-        yield* resolveReferenceRepoRef(effectSmol, rootDir, false),
-        "effect@4.0.0-beta.73",
+        yield* resolveReferenceRepoRef(effectReference, rootDir, false),
+        "effect@4.0.0",
       );
     }),
   );
@@ -88,7 +88,7 @@ it.layer(NodeServices.layer)("sync-reference-repos", (it) => {
         prefix: "sync-reference-repos-latest-",
       });
 
-      assert.equal(yield* resolveReferenceRepoRef(effectSmol, rootDir, true), "main");
+      assert.equal(yield* resolveReferenceRepoRef(effectReference, rootDir, true), "main");
     }),
   );
 
@@ -99,15 +99,15 @@ it.layer(NodeServices.layer)("sync-reference-repos", (it) => {
       const rootDir = yield* fs.makeTempDirectoryScoped({
         prefix: "sync-reference-repos-read-error-",
       });
-      const sourcePath = path.join(rootDir, effectSmol.versionSourcePath);
+      const sourcePath = path.join(rootDir, alchemyEffect.versionSourcePath);
 
-      const error = yield* resolveReferenceRepoRef(effectSmol, rootDir, false).pipe(Effect.flip);
+      const error = yield* resolveReferenceRepoRef(alchemyEffect, rootDir, false).pipe(Effect.flip);
 
       if (error._tag !== "ReferenceRepoVersionSourceError") {
         assert.fail(`Unexpected error: ${error._tag}`);
       }
       assert.equal(error.operation, "read");
-      assert.equal(error.repoId, effectSmol.id);
+      assert.equal(error.repoId, alchemyEffect.id);
       assert.equal(error.sourcePath, sourcePath);
       assert.ok(error.cause !== undefined);
       assert.ok(!error.message.includes(String((error.cause as Error).message)));
@@ -190,19 +190,19 @@ it.layer(NodeServices.layer)("sync-reference-repos", (it) => {
         "catalog:\n  effect: 4.0.0-beta.73\n",
       );
 
-      const addPlan = yield* planReferenceRepoSync(effectSmol, rootDir, false);
+      const addPlan = yield* planReferenceRepoSync(effectReference, rootDir, false);
       assert.equal(addPlan.action, "add");
       assert.deepStrictEqual(addPlan.args, [
         "subtree",
         "add",
-        "--prefix=.repos/effect-smol",
+        "--prefix=.repos/effect",
         "https://github.com/Effect-TS/effect.git",
-        "effect@4.0.0-beta.73",
+        "effect@4.0.0",
         "--squash",
       ]);
 
-      yield* fs.makeDirectory(path.join(rootDir, effectSmol.prefix), { recursive: true });
-      assert.equal((yield* planReferenceRepoSync(effectSmol, rootDir, false)).action, "pull");
+      yield* fs.makeDirectory(path.join(rootDir, effectReference.prefix), { recursive: true });
+      assert.equal((yield* planReferenceRepoSync(effectReference, rootDir, false)).action, "pull");
     }),
   );
 
@@ -220,7 +220,7 @@ it.layer(NodeServices.layer)("sync-reference-repos", (it) => {
         "catalog:\n  effect: 4.0.0-beta.73\n",
       );
 
-      yield* syncReferenceRepos({ rootDir, repoId: "effect-smol" }).pipe(
+      yield* syncReferenceRepos({ rootDir, repoId: "effect" }).pipe(
         Effect.provide(mockSpawnerLayer(commands)),
       );
 
@@ -230,9 +230,9 @@ it.layer(NodeServices.layer)("sync-reference-repos", (it) => {
           args: [
             "subtree",
             "add",
-            "--prefix=.repos/effect-smol",
+            "--prefix=.repos/effect",
             "https://github.com/Effect-TS/effect.git",
-            "effect@4.0.0-beta.73",
+            "effect@4.0.0",
             "--squash",
           ],
         },
@@ -251,7 +251,7 @@ it.layer(NodeServices.layer)("sync-reference-repos", (it) => {
         assert.fail(`Unexpected error: ${error._tag}`);
       }
       assert.equal(error.repoId, "missing");
-      assert.deepStrictEqual(error.expectedRepoIds, ["effect-smol", "alchemy-effect"]);
+      assert.deepStrictEqual(error.expectedRepoIds, ["effect", "alchemy-effect"]);
       assert.ok(!("cause" in error));
     }),
   );
@@ -270,7 +270,7 @@ it.layer(NodeServices.layer)("sync-reference-repos", (it) => {
         "catalog:\n  effect: 4.0.0-beta.73\n",
       );
 
-      const error = yield* syncReferenceRepos({ rootDir, repoId: "effect-smol" }).pipe(
+      const error = yield* syncReferenceRepos({ rootDir, repoId: "effect" }).pipe(
         Effect.provide(
           mockSpawnerLayer(
             commands,
@@ -284,10 +284,10 @@ it.layer(NodeServices.layer)("sync-reference-repos", (it) => {
         assert.fail(`Unexpected error: ${error._tag}`);
       }
       assert.equal(error.operation, "exit");
-      assert.equal(error.repoId, effectSmol.id);
+      assert.equal(error.repoId, effectReference.id);
       assert.equal(error.action, "add");
-      assert.equal(error.repository, effectSmol.repository);
-      assert.equal(error.ref, "effect@4.0.0-beta.73");
+      assert.equal(error.repository, effectReference.repository);
+      assert.equal(error.ref, "effect@4.0.0");
       assert.equal(error.rootDir, rootDir);
       assert.equal(error.argumentCount, commands[0]?.args.length);
       assert.equal(error.exitCode, 23);

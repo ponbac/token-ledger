@@ -412,13 +412,31 @@ application checks and editor indexing, and marked vendored for GitHub statistic
 
 ```sh
 # Start with a clean working tree. Change the version deliberately when upgrading.
-bun run reference:update effect 'effect@4.0.0-rc.117'
+bun run reference:update effect 'effect@4.0.0'
 bun run reference:update t3code main
+# Refresh only the Effect-source overlay within the T3 Code reference:
+bun run reference:update effect-t3code 'effect@4.0.0'
 ```
 
-Update Effect dependencies together with their reference. Git subtree commit
+Refresh the Effect reference after upgrading dependencies, in a separate PR stacked
+above the dependency upgrade. The Effect reference is pinned to `effect@4.0.0`
+(`67ba4e46a11ccda0b6761578bfd22c04ae00167d`) from
+[`Effect-TS/effect`](https://github.com/Effect-TS/effect). Git subtree commit
 messages record the imported revisions. The initial T3 reference is upstream
 `aff9318bf46beaf05cc7155b428d3f0b8711efd2`.
+
+The nested `.reference/t3code/.repos/effect` snapshot has a deliberate overlay
+of the same stable Effect source. Related T3 Code docs and updater paths use this
+canonical name; unrelated T3 Code reference files keep their imported revision.
+Its nested subtree history was omitted by the outer squash, so the updater
+replaces that snapshot and records its upstream URL, release tag, and commit in Git
+commit trailers. Refreshing either outer reference reapplies this Effect overlay;
+refreshing T3 Code uses the root manifest's installed Effect version.
+The updater also removes a legacy nested snapshot reintroduced by upstream and
+reapplies the canonical paths in T3 Code's reference docs and updater files.
+Its own reference-sync command pins Effect to `effect@4.0.0`, independently of
+the vendored T3 runtime catalog; `--latest` still explicitly selects `main`.
+The parent updater reapplies this small source patch after outer T3 refreshes.
 
 ## License
 

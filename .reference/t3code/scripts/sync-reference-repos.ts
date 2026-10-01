@@ -169,6 +169,10 @@ export const resolveReferenceRepoRef = Effect.fn("resolveReferenceRepoRef")(func
     return repo.latestRef;
   }
 
+  if (repo.pinnedRef !== undefined) {
+    return repo.pinnedRef;
+  }
+
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const versionSourcePath = path.join(rootDir, repo.versionSourcePath);
@@ -299,7 +303,7 @@ export const syncReferenceReposCommand = Command.make(
     ),
     latest: Flag.Boolean("latest").pipe(
       Flag.withDescription(
-        "Sync each repo from its latest branch instead of the installed version.",
+        "Sync each repo from its latest branch instead of its configured pin or installed version.",
       ),
       Flag.withDefault(false),
     ),

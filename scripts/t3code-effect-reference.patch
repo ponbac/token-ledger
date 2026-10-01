@@ -1,0 +1,164 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index 6e821c0c..5e440e2c 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -149,6 +149,7 @@ Full glossary with file links: `docs/internals/glossary.md`
+ ## Where code lives
+ 
+ - `apps/server` - WebSocket, orchestration, providers, checkpointing. Effect-heavy: read `.repos/effect/LLMS.md` before writing Effect code.
++- `.repos/effect` is pinned to stable `effect@4.0.0` independently of this vendored T3 Code snapshot's prerelease runtime catalog. Ordinary reference sync preserves the pin; `--latest` explicitly selects `main`.
+ - `apps/web` - React/Vite UI. `apps/desktop` wraps it, `apps/mobile` is React Native, `apps/marketing` is the site.
+ - `packages/contracts` - Effect/Schema contracts plus small derived helpers. No heavy runtime logic.
+ - `packages/shared` - shared runtime utils, subpath exports, no barrel.
+diff --git a/scripts/lib/reference-repos.ts b/scripts/lib/reference-repos.ts
+index 3a80d331..07528835 100644
+--- a/scripts/lib/reference-repos.ts
++++ b/scripts/lib/reference-repos.ts
+@@ -3,6 +3,7 @@ export interface ReferenceRepo {
+   readonly prefix: string;
+   readonly repository: string;
+   readonly latestRef: string;
++  readonly pinnedRef?: string;
+   readonly versionSourcePath: string;
+   readonly packageVersionPath: ReadonlyArray<string>;
+   readonly versionTagPrefix: string;
+@@ -14,6 +15,7 @@ export const referenceRepos: ReadonlyArray<ReferenceRepo> = [
+     prefix: ".repos/effect",
+     repository: "https://github.com/Effect-TS/effect.git",
+     latestRef: "main",
++    pinnedRef: "effect@4.0.0",
+     versionSourcePath: "pnpm-workspace.yaml",
+     packageVersionPath: ["catalog", "effect"],
+     versionTagPrefix: "effect@",
+diff --git a/scripts/sync-reference-repos.test.ts b/scripts/sync-reference-repos.test.ts
+index 0a58fe8c..5a4630b5 100644
+--- a/scripts/sync-reference-repos.test.ts
++++ b/scripts/sync-reference-repos.test.ts
+@@ -16,7 +16,7 @@ import {
+ } from "./sync-reference-repos.ts";
+ 
+ const encoder = new TextEncoder();
+-const effectSmol = referenceRepos[0]!;
++const effectReference = referenceRepos[0]!;
+ const alchemyEffect = referenceRepos[1]!;
+ 
+ function mockHandle(
+@@ -62,7 +62,7 @@ function mockSpawnerLayer(
+ }
+ 
+ it.layer(NodeServices.layer)("sync-reference-repos", (it) => {
+-  it.effect("resolves the effect tag from the root catalog", () =>
++  it.effect("keeps the stable Effect reference pin when the runtime catalog is a prerelease", () =>
+     Effect.gen(function* () {
+       const fs = yield* FileSystem.FileSystem;
+       const path = yield* Path.Path;
+@@ -75,8 +75,8 @@ it.layer(NodeServices.layer)("sync-reference-repos", (it) => {
+       );
+ 
+       assert.equal(
+-        yield* resolveReferenceRepoRef(effectSmol, rootDir, false),
+-        "effect@4.0.0-beta.73",
++        yield* resolveReferenceRepoRef(effectReference, rootDir, false),
++        "effect@4.0.0",
+       );
+     }),
+   );
+@@ -88,7 +88,7 @@ it.layer(NodeServices.layer)("sync-reference-repos", (it) => {
+         prefix: "sync-reference-repos-latest-",
+       });
+ 
+-      assert.equal(yield* resolveReferenceRepoRef(effectSmol, rootDir, true), "main");
++      assert.equal(yield* resolveReferenceRepoRef(effectReference, rootDir, true), "main");
+     }),
+   );
+ 
+@@ -99,15 +99,15 @@ it.layer(NodeServices.layer)("sync-reference-repos", (it) => {
+       const rootDir = yield* fs.makeTempDirectoryScoped({
+         prefix: "sync-reference-repos-read-error-",
+       });
+-      const sourcePath = path.join(rootDir, effectSmol.versionSourcePath);
++      const sourcePath = path.join(rootDir, alchemyEffect.versionSourcePath);
+ 
+-      const error = yield* resolveReferenceRepoRef(effectSmol, rootDir, false).pipe(Effect.flip);
++      const error = yield* resolveReferenceRepoRef(alchemyEffect, rootDir, false).pipe(Effect.flip);
+ 
+       if (error._tag !== "ReferenceRepoVersionSourceError") {
+         assert.fail(`Unexpected error: ${error._tag}`);
+       }
+       assert.equal(error.operation, "read");
+-      assert.equal(error.repoId, effectSmol.id);
++      assert.equal(error.repoId, alchemyEffect.id);
+       assert.equal(error.sourcePath, sourcePath);
+       assert.ok(error.cause !== undefined);
+       assert.ok(!error.message.includes(String((error.cause as Error).message)));
+@@ -190,19 +190,19 @@ it.layer(NodeServices.layer)("sync-reference-repos", (it) => {
+         "catalog:\n  effect: 4.0.0-beta.73\n",
+       );
+ 
+-      const addPlan = yield* planReferenceRepoSync(effectSmol, rootDir, false);
++      const addPlan = yield* planReferenceRepoSync(effectReference, rootDir, false);
+       assert.equal(addPlan.action, "add");
+       assert.deepStrictEqual(addPlan.args, [
+         "subtree",
+         "add",
+         "--prefix=.repos/effect",
+         "https://github.com/Effect-TS/effect.git",
+-        "effect@4.0.0-beta.73",
++        "effect@4.0.0",
+         "--squash",
+       ]);
+ 
+-      yield* fs.makeDirectory(path.join(rootDir, effectSmol.prefix), { recursive: true });
+-      assert.equal((yield* planReferenceRepoSync(effectSmol, rootDir, false)).action, "pull");
++      yield* fs.makeDirectory(path.join(rootDir, effectReference.prefix), { recursive: true });
++      assert.equal((yield* planReferenceRepoSync(effectReference, rootDir, false)).action, "pull");
+     }),
+   );
+ 
+@@ -232,7 +232,7 @@ it.layer(NodeServices.layer)("sync-reference-repos", (it) => {
+             "add",
+             "--prefix=.repos/effect",
+             "https://github.com/Effect-TS/effect.git",
+-            "effect@4.0.0-beta.73",
++            "effect@4.0.0",
+             "--squash",
+           ],
+         },
+@@ -284,10 +284,10 @@ it.layer(NodeServices.layer)("sync-reference-repos", (it) => {
+         assert.fail(`Unexpected error: ${error._tag}`);
+       }
+       assert.equal(error.operation, "exit");
+-      assert.equal(error.repoId, effectSmol.id);
++      assert.equal(error.repoId, effectReference.id);
+       assert.equal(error.action, "add");
+-      assert.equal(error.repository, effectSmol.repository);
+-      assert.equal(error.ref, "effect@4.0.0-beta.73");
++      assert.equal(error.repository, effectReference.repository);
++      assert.equal(error.ref, "effect@4.0.0");
+       assert.equal(error.rootDir, rootDir);
+       assert.equal(error.argumentCount, commands[0]?.args.length);
+       assert.equal(error.exitCode, 23);
+diff --git a/scripts/sync-reference-repos.ts b/scripts/sync-reference-repos.ts
+index e56c5fe9..fbb6e80b 100644
+--- a/scripts/sync-reference-repos.ts
++++ b/scripts/sync-reference-repos.ts
+@@ -169,6 +169,10 @@ export const resolveReferenceRepoRef = Effect.fn("resolveReferenceRepoRef")(func
+     return repo.latestRef;
+   }
+ 
++  if (repo.pinnedRef !== undefined) {
++    return repo.pinnedRef;
++  }
++
+   const fs = yield* FileSystem.FileSystem;
+   const path = yield* Path.Path;
+   const versionSourcePath = path.join(rootDir, repo.versionSourcePath);
+@@ -299,7 +303,7 @@ export const syncReferenceReposCommand = Command.make(
+     ),
+     latest: Flag.Boolean("latest").pipe(
+       Flag.withDescription(
+-        "Sync each repo from its latest branch instead of the installed version.",
++        "Sync each repo from its latest branch instead of its configured pin or installed version.",
+       ),
+       Flag.withDefault(false),
+     ),
