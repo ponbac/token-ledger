@@ -1,5 +1,5 @@
 import { Clock, Effect, FileSystem, Option, Path, Schema } from "effect";
-import { HttpClient, HttpClientResponse } from "effect/unstable/http";
+import { HttpClient, HttpClientResponse } from "effect/http";
 
 import { ModelPrice, PriceBook, type Tokens } from "./model.ts";
 

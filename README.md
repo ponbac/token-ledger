@@ -395,7 +395,7 @@ bun run lint:fix
   `Ledger.report` returns data and typed failures, with no terminal rendering.
 - `packages/cli`: Effect CLI and process wiring. A later UI can run the same core
   through a local backend.
-- Effect and platform packages are pinned to `4.0.0-rc.117`.
+- Effect and platform packages are pinned to stable `4.0.0`.
 - Oxlint `1.80.0` with type-aware checks, Oxfmt `0.66.0`, and all 18 generic plus
   five Effect anti-slop policies gate CI, including test code, without exemptions.
   TypeScript owns duplicate declaration checking for schema/type pairs.
