@@ -414,6 +414,8 @@ application checks and editor indexing, and marked vendored for GitHub statistic
 # Start with a clean working tree. Change the version deliberately when upgrading.
 bun run reference:update effect 'effect@4.0.0'
 bun run reference:update t3code main
+# Refresh only the Effect-source overlay within the T3 Code reference:
+bun run reference:update effect-t3code 'effect@4.0.0'
 ```
 
 Refresh the Effect reference after upgrading dependencies, in a separate PR stacked
@@ -422,6 +424,13 @@ above the dependency upgrade. The Effect reference is pinned to `effect@4.0.0`
 [`Effect-TS/effect`](https://github.com/Effect-TS/effect). Git subtree commit
 messages record the imported revisions. The initial T3 reference is upstream
 `aff9318bf46beaf05cc7155b428d3f0b8711efd2`.
+
+The nested `.reference/t3code/.repos/effect-smol` snapshot has a deliberate overlay
+of the same stable Effect source. Other T3 Code reference files keep their imported
+revision. Its nested subtree history was omitted by the outer squash, so the updater
+replaces that snapshot and records its upstream URL, release tag, and commit in Git
+commit trailers. Refreshing either outer reference reapplies this Effect overlay;
+refreshing T3 Code uses the root manifest's installed Effect version.
 
 ## License
 
