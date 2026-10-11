@@ -110,12 +110,12 @@ exceeds `records`, and `estimatedCostUsd` is `null` exactly when `unpricedRecord
 
 ## Coverage status
 
-| `status`  | Meaning                                                                        | Server      |
-| --------- | ------------------------------------------------------------------------------ | ----------- |
-| `ok`      | Every history file that could hold usage in `window` was read.                 | Replace     |
-| `partial` | Every such file was read, but some lines or records were unusable or excluded. | Replace     |
-| `failed`  | Some existing history could not be read (`unreadable` > 0).                    | Keep stored |
-| `missing` | No history was found for the provider.                                         | Keep stored |
+| `status`  | Meaning                                                                  | Server      |
+| --------- | ------------------------------------------------------------------------ | ----------- |
+| `ok`      | Every history file that could hold usage in `window` was read.           | Replace     |
+| `partial` | Every such file was read, but some lines or usage records were unusable. | Replace     |
+| `failed`  | Some existing history could not be read (`unreadable` > 0).              | Keep stored |
+| `missing` | No history was found for the provider.                                   | Keep stored |
 
 A provider absent from `coverage` was not scanned, for example because of
 `--provider`, and also keeps its stored data. Missing data is never treated as zero.

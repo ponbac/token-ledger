@@ -400,7 +400,7 @@ describe("Ledger reports through the public interface", () => {
     }).pipe(Effect.provide(runtime)),
   );
 
-  it.effect("excludes copied fork bursts and retains later model switches", () =>
+  it.effect("excludes copied fork bursts as already counted and retains later model switches", () =>
     Effect.gen(function* () {
       const { write } = yield* fixture();
 
@@ -427,8 +427,33 @@ describe("Ledger reports through the public interface", () => {
         report.rows.find((row) => row.model === "private-model")?.estimatedCostUsd,
         null,
       );
-      assert.strictEqual(report.coverage[0]?.status, "partial");
-      assert.strictEqual(report.coverage[0]?.skippedRecords, 1);
+      // The parent's rollout already counted the copy, so nothing was lost.
+      assert.deepInclude(report.coverage[0], { status: "ok", skippedRecords: 0, warnings: [] });
+
+      // A re-emission and a rate-limit update follow the copy, each under a second after the
+      // event before it; only new usage may carry the burst on, so the first turn is counted.
+      const refreshed = yield* write("fork-refreshed.jsonl", [
+        JSON.stringify({
+          type: "session_meta",
+          timestamp: "2026-09-22T09:10:00Z",
+          payload: { id: "fork-refreshed", forked_from_id: "parent" },
+        }),
+        JSON.stringify({ type: "turn_context", payload: { model: "test-model" } }),
+        codexUsage("09:10:00.100"),
+        codexUsage("09:10:00.700"),
+        JSON.stringify({
+          type: "event_msg",
+          timestamp: "2026-09-22T09:10:00.900Z",
+          payload: { type: "token_count", info: null },
+        }),
+        codexUsage("09:10:01.500", 103, 23, 203),
+      ]);
+
+      const first = yield* ledger.report(request([{ provider: "codex", path: refreshed }]));
+      assert.deepStrictEqual(
+        first.rows.map((row) => [row.records, row.tokens.output]),
+        [[1, 23]],
+      );
     }).pipe(Effect.provide(runtime)),
   );
 

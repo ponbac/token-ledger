@@ -585,8 +585,11 @@ refused, `5` unsupported payload version (upgrade token-ledger), `6` payload rej
   correlated across files and a live SQLite database's modification time lags its rows.
 - Copied files, overlapping source paths, and stable provider record IDs are deduplicated.
   Missing stable IDs are called out where the provider cannot support that guarantee.
-- Codex fork histories use T3 Code's timing heuristic to exclude the leading copied
-  burst. The report explicitly marks affected coverage as partial.
+- Codex fork and subagent histories begin with a copy of their parent's history, which
+  the parent's own rollout already counts. T3 Code's timing heuristic excludes that
+  leading burst; it is not lost usage, so coverage stays `ok`. `partial` means real loss:
+  malformed lines, usage events that could not be normalized, or, in a report, paths
+  that could not be read.
 - A truncated or malformed JSONL line is skipped and counted. No prompts are printed
   in diagnostics. An active session can change during a scan; this is not a transactional snapshot.
 - Coverage diagnostics describe every opened file, including its events outside the
