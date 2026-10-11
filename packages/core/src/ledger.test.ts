@@ -568,8 +568,12 @@ describe("Ledger reports through the public interface", () => {
 
       const ledger = yield* Ledger;
 
+      // Each directory is its own source, the fork's first.
       const report = yield* ledger.report({
-        ...request([{ provider: "pi", path: at("pi") }]),
+        ...request([
+          { provider: "pi", path: at("pi/--work-earlier--") },
+          { provider: "pi", path: at("pi/--work-mapped--") },
+        ]),
         projects: [
           { project: "Client A", paths: [at("mapped")], repositories: [] },
           { project: "Client B", paths: [at("other")], repositories: [] },
@@ -609,15 +613,27 @@ describe("Ledger reports through the public interface", () => {
           ],
         ],
       );
-      assert.deepInclude(report.coverage[0], {
-        status: "ok",
-        files: 2,
-        duplicates: 2,
-        skippedRecords: 0,
-        warnings: [
-          "Pi tool and summary usage names no model; these tokens remain unpriced unless an explicit rate is supplied.",
+      assert.deepStrictEqual(
+        report.coverage.map((source) => [
+          source.status,
+          source.files,
+          source.duplicates,
+          source.skippedRecords,
+          source.warnings,
+        ]),
+        [
+          ["ok", 1, 2, 0, []],
+          [
+            "ok",
+            1,
+            0,
+            0,
+            [
+              "Pi tool and summary usage names no model; these tokens remain unpriced unless an explicit rate is supplied.",
+            ],
+          ],
         ],
-      });
+      );
 
       const stamp = { timestamp: "2026-09-22T11:00:00Z", model: "test-model" };
 
@@ -627,10 +643,13 @@ describe("Ledger reports through the public interface", () => {
         // Usage in an entry that is otherwise not as documented is lost, never ignored.
         JSON.stringify({ ...stamp, type: "usage", id: null, usage: piUsage(1, 1) }),
         JSON.stringify({ ...stamp, type: "usage", id: "c0000004", usage: { input: 1, output: 1 } }),
+        // So is usage on a kind of entry Pi did not have when this was written.
+        JSON.stringify({ ...stamp, type: "later_kind", id: "c0000005", usage: piUsage(1, 1) }),
+        JSON.stringify({ ...stamp, id: "c0000006", usage: piUsage(1, 1) }),
       ]);
 
       const partial = yield* ledger.report(request([{ provider: "pi", path: invalid }]));
-      assert.deepInclude(partial.coverage[0], { status: "partial", skippedRecords: 4 });
+      assert.deepInclude(partial.coverage[0], { status: "partial", skippedRecords: 6 });
       assert.lengthOf(partial.rows, 0);
     }).pipe(Effect.provide(runtime)),
   );

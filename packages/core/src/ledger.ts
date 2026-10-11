@@ -122,7 +122,10 @@ export class Ledger extends Context.Service<
         const visitedFiles = new Set<string>();
         // Counted without being opened; a later source naming one of these files still reads it.
         const settledFiles = new Set<string>();
-        const coverage: Coverage[] = [];
+        // Built once every source is read, when its duplicate count is final.
+        const coverage: Array<() => Coverage> = [];
+        // A fork's copies wait for every source, so whichever file holds the original wins.
+        const inherited: Array<Effect.Effect<void>> = [];
 
         for (const source of request.sources) {
           let files = 0;
@@ -135,8 +138,6 @@ export class Ledger extends Context.Service<
           const warnings = new Set<string>();
 
           const copilot = source.provider === "copilot" ? copilotParser(source.path) : undefined;
-          // Copies wait for the rest of the source, so whichever file holds the original wins.
-          const inherited: Array<readonly [UsageRecord, Slot]> = [];
 
           const place = Effect.fn("Ledger.placeRecord")(function* (
             record: UsageRecord,
@@ -175,7 +176,7 @@ export class Ledger extends Context.Service<
               const slot = locate(record.timestamp);
 
               if (slot !== undefined && totalTokens(record.tokens) > 0)
-                inherited.push([record, slot]);
+                inherited.push(place(record, slot));
             }
           });
 
@@ -275,8 +276,6 @@ export class Ledger extends Context.Service<
 
           if (copilot?.finish !== undefined) yield* accept(copilot.finish());
 
-          for (const [record, slot] of inherited) yield* place(record, slot);
-
           const status = missingRoot
             ? "missing"
             : failedFiles > 0 && files === 0
@@ -285,7 +284,7 @@ export class Ledger extends Context.Service<
                 ? "partial"
                 : "ok";
 
-          coverage.push({
+          coverage.push(() => ({
             provider: source.provider,
             source: source.path,
             status,
@@ -296,10 +295,12 @@ export class Ledger extends Context.Service<
             skippedRecords,
             duplicates,
             warnings: [...warnings],
-          });
+          }));
         }
 
-        return coverage;
+        for (const copy of inherited) yield* copy;
+
+        return coverage.map((summarize) => summarize());
       });
 
       const report = Effect.fn("Ledger.report")(function* (input: ReportRequest) {

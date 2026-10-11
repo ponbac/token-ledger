@@ -78,11 +78,10 @@ export function piParser(file: string): TranscriptParser {
       const raw = Option.getOrNull(decodeJson(line));
 
       if (raw === null) return malformed;
-      const kind = Option.getOrNull(decodeKind(raw));
+      // Undefined when the entry names no kind.
+      const type = Option.getOrNull(decodeKind(raw))?.type;
 
-      if (kind === null) return empty;
-
-      if (kind.type === "session") {
+      if (type === "session") {
         if (sawHeader) return empty;
         const header = Option.getOrNull(decodeHeader(raw));
 
@@ -95,29 +94,29 @@ export function piParser(file: string): TranscriptParser {
         return empty;
       }
 
-      if (
-        kind.type !== "message" &&
-        kind.type !== "usage" &&
-        kind.type !== "compaction" &&
-        kind.type !== "branch_summary"
-      ) {
-        return empty;
-      }
-
-      const wrapper =
-        kind.type === "message" ? Option.getOrNull(decodeWrapper(raw)) : { message: raw };
-
+      const wrapper = type === "message" ? Option.getOrNull(decodeWrapper(raw)) : { message: raw };
       const carrier = wrapper === null ? null : Option.getOrNull(decodeCarrier(wrapper.message));
 
-      if (wrapper === null || carrier === null) return malformed;
-      const assistant = kind.type === "message" && carrier.role === "assistant";
+      if (wrapper === null || carrier === null) return type === "message" ? malformed : empty;
+      const assistant = type === "message" && carrier.role === "assistant";
 
-      if (kind.type === "message" && !assistant && carrier.role !== "toolResult") return empty;
+      if (type === "message" && !assistant && carrier.role !== "toolResult") return empty;
       // Only assistant messages and `usage` entries name a model, and they always carry usage.
-      const attributed = assistant || kind.type === "usage";
+      const attributed = assistant || type === "usage";
       const usage = carrier.usage;
 
       if (usage === undefined || usage === null) return attributed ? skipped : empty;
+
+      // Usage on a kind of entry this adapter does not know cannot be read as none.
+      if (
+        type !== "message" &&
+        type !== "usage" &&
+        type !== "compaction" &&
+        type !== "branch_summary"
+      ) {
+        return skipped;
+      }
+
       const stamp = Option.getOrNull(decodeStamp(raw));
       const names = Option.getOrNull(decodeNames(wrapper.message));
       const count = Option.getOrNull(decodeCounts(usage));
