@@ -293,7 +293,7 @@ const report = Command.make(
     for (const source of result.coverage) {
       if (source.status !== "ok" || source.warnings.length > 0)
         yield* Console.error(
-          `${source.provider}: ${source.status}; ${source.files} files, ${source.malformedLines} malformed lines, ${source.skippedRecords} skipped records. ${source.warnings.join(" ")}`,
+          `${source.provider}: ${source.status}; ${source.files} files, ${source.filesBeforeWindow} older files not opened, ${source.malformedLines} malformed lines, ${source.skippedRecords} skipped records. ${source.warnings.join(" ")}`,
         );
     }
 
@@ -360,7 +360,7 @@ const sync = Command.make(
     for (const entry of payload.coverage) {
       if (entry.status !== "ok")
         yield* Console.error(
-          `${entry.provider}: ${entry.status}; ${entry.files} files, ${entry.unreadable} unreadable, ${entry.malformedLines} malformed lines, ${entry.skippedRecords} skipped records.${entry.status === "failed" ? " Not uploaded; the server keeps its stored usage." : ""}`,
+          `${entry.provider}: ${entry.status}; ${entry.files} files, ${entry.filesBeforeWindow ?? 0} older files not opened, ${entry.unreadable} unreadable, ${entry.malformedLines} malformed lines, ${entry.skippedRecords} skipped records.${entry.status === "failed" ? " Not uploaded; the server keeps its stored usage." : ""}`,
         );
     }
 

@@ -4,6 +4,7 @@ import {
   FileSystem,
   Layer,
   Match,
+  Option,
   Path,
   type PlatformError,
   Predicate,
@@ -41,6 +42,14 @@ import {
   sessionBuckets,
   unattributed,
 } from "./sync.ts";
+
+/**
+ * Transcripts are append-only, so a file holds no event later than its last write, and one last
+ * modified before the window is not opened, as in T3 Code. The slack is T3 Code's: it absorbs
+ * clocks and file systems that disagree with event timestamps, and exceeds the widest gap
+ * between two time zones.
+ */
+const modifiedSlack = 36 * 60 * 60 * 1000;
 
 /** Invalid report windows or paths, with no provider payloads in the error. */
 export class InvalidRequest extends Schema.TaggedError<InvalidRequest>()("InvalidRequest", {
@@ -94,9 +103,11 @@ export class Ledger extends Context.Service<
       /**
        * Streams each deduplicated, non-empty record that `locate` places, with its project, and
        * each plan hint it places. Records outside the window are neither deduplicated nor attributed.
+       * `locate` places nothing before `start`, so files settled before it are counted unopened.
        */
       const scan = Effect.fn("Ledger.scan")(function* <Slot>(
         request: ReportRequest,
+        start: number,
         locate: (timestamp: number) => Slot | undefined,
         collect: (record: UsageRecord, attribution: Attribution, slot: Slot) => void,
         notice?: (plan: ObservedPlan) => void,
@@ -112,6 +123,7 @@ export class Ledger extends Context.Service<
 
         for (const source of request.sources) {
           let files = 0;
+          let filesBeforeWindow = 0;
           let malformedLines = 0;
           let skippedRecords = 0;
           let duplicates = 0;
@@ -148,7 +160,10 @@ export class Ledger extends Context.Service<
             }
           });
 
-          const scanFile = Effect.fn("Ledger.scanFile")(function* (file: string) {
+          const scanFile = Effect.fn("Ledger.scanFile")(function* (
+            file: string,
+            info: FileSystem.File.Info,
+          ) {
             const canonical = yield* fs.realPath(file);
             const identity = `${source.provider}:${canonical}`;
 
@@ -161,6 +176,12 @@ export class Ledger extends Context.Service<
             }
 
             visitedFiles.add(identity);
+
+            if (settledBefore(source, file, info, start - modifiedSlack)) {
+              filesBeforeWindow++;
+
+              return;
+            }
 
             const parser = Match.value(source.provider).pipe(
               Match.when("codex", () => codexParser(canonical)),
@@ -214,7 +235,7 @@ export class Ledger extends Context.Service<
                 for (const child of children.toSorted().toReversed())
                   pending.push(path.join(entry, child));
               } else if (stat.type === "File" && acceptsFile(source, entry)) {
-                yield* scanFile(entry);
+                yield* scanFile(entry, stat);
               }
             }).pipe(Effect.result);
 
@@ -245,6 +266,7 @@ export class Ledger extends Context.Service<
             source: source.path,
             status,
             files,
+            filesBeforeWindow,
             unreadable: missingRoot ? 0 : failedFiles,
             malformedLines,
             skippedRecords,
@@ -261,19 +283,24 @@ export class Ledger extends Context.Service<
         const window = dayWindow(request.since, request.until, request.timeZone);
         const rows = new Map<string, ReportRow>();
 
-        const coverage = yield* scan(request, window.dayOf, (record, { project }, day) => {
-          const key = JSON.stringify([project, day, record.provider, record.model]);
-          const price = lookupPrice(request.pricing, record.model);
+        const coverage = yield* scan(
+          request,
+          window.start,
+          window.dayOf,
+          (record, { project }, day) => {
+            const key = JSON.stringify([project, day, record.provider, record.model]);
+            const price = lookupPrice(request.pricing, record.model);
 
-          rows.set(key, {
-            project,
-            day,
-            provider: record.provider,
-            model: record.model,
-            pricePerMillion: price ?? null,
-            ...addUsage(rows.get(key), record.tokens, priceTokens(record.tokens, price)),
-          });
-        });
+            rows.set(key, {
+              project,
+              day,
+              provider: record.provider,
+              model: record.model,
+              pricePerMillion: price ?? null,
+              ...addUsage(rows.get(key), record.tokens, priceTokens(record.tokens, price)),
+            });
+          },
+        );
 
         return UsageReport.make({
           version: 2,
@@ -320,6 +347,7 @@ export class Ledger extends Context.Service<
 
         const coverage = yield* scan(
           request,
+          window.start,
           (timestamp) =>
             timestamp >= window.start && timestamp < window.end ? timestamp : undefined,
           (record, attribution) =>
@@ -372,4 +400,21 @@ function acceptsFile(source: Source, file: string): boolean {
     return file.endsWith("/updates.jsonl") || file.endsWith("\\updates.jsonl");
 
   return file.endsWith(".jsonl") || (source.provider === "copilot" && file.endsWith(".db"));
+}
+
+/**
+ * Whether a file found under a source directory was last modified before `cutoff`, and so holds
+ * no later usage. A file named as the source itself is always read. So is every Copilot file: a
+ * request takes its repository and cache details from spans in other files, and a live SQLite
+ * database keeps new rows in its write-ahead log without touching its own modification time.
+ */
+function settledBefore(
+  source: Source,
+  file: string,
+  info: FileSystem.File.Info,
+  cutoff: number,
+): boolean {
+  if (source.path === file || source.provider === "copilot") return false;
+
+  return Option.isSome(info.mtime) && info.mtime.value.getTime() < cutoff;
 }

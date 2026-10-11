@@ -91,6 +91,8 @@ export const SyncCoverage = Schema.Struct({
   provider: Provider,
   status: Coverage.fields.status,
   files: Schema.Natural,
+  // Added after the first version 1 clients, which omit it.
+  filesBeforeWindow: Schema.optionalKey(Schema.Natural),
   unreadable: Schema.Natural,
   malformedLines: Schema.Natural,
   skippedRecords: Schema.Natural,
@@ -271,7 +273,8 @@ export function sessionBuckets(pricing: PriceBook) {
 
 /**
  * Merges per-source coverage by provider into what the server may replace. `ok` and `partial`
- * mean every existing file was read (`partial`: some lines or records were unusable). `failed`
+ * mean every file that could hold usage in the window was read (`partial`: some lines or records
+ * were unusable); files last modified too long before it are counted, not opened. `failed`
  * means some existing history could not be read, and `missing` that none was found; the server
  * keeps its data for both. An absent source only matters when the provider has no other.
  */
@@ -304,6 +307,7 @@ export function providerCoverage(coverage: readonly Coverage[]): SyncCoverage[] 
         provider,
         status,
         files: sum((source) => source.files),
+        filesBeforeWindow: sum((source) => source.filesBeforeWindow),
         unreadable: sum((source) => source.unreadable),
         malformedLines: sum((source) => source.malformedLines),
         skippedRecords: sum((source) => source.skippedRecords),

@@ -22,6 +22,7 @@ function source(
     source: `/fixture/${provider}/${status}`,
     status,
     files,
+    filesBeforeWindow: 0,
     unreadable,
     malformedLines: status === "partial" ? 1 : 0,
     skippedRecords: 0,
@@ -56,6 +57,7 @@ it("replaces only providers whose existing history was fully read", () => {
 it("requires fully read history before coverage can authorize replacement", () => {
   const valid = Schema.is(SyncCoverage);
 
+  // The first version 1 clients send no filesBeforeWindow.
   const coverage = {
     provider: "codex",
     files: 1,
@@ -67,6 +69,8 @@ it("requires fully read history before coverage can authorize replacement", () =
 
   for (const status of ["ok", "partial", "missing", "failed"] as const)
     assert.isTrue(valid({ ...coverage, status }));
+
+  assert.isTrue(valid({ ...coverage, status: "ok", files: 0, filesBeforeWindow: 3 }));
 
   for (const status of ["missing", "failed"] as const)
     assert.isTrue(valid({ ...coverage, status, unreadable: 1 }));
@@ -108,6 +112,7 @@ it("only builds payloads the server can store", () => {
     provider: "codex",
     status: "ok",
     files: 1,
+    filesBeforeWindow: 0,
     unreadable: 0,
     malformedLines: 0,
     skippedRecords: 0,

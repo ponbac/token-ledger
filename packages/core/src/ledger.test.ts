@@ -32,7 +32,12 @@ const fixture = Effect.fn("Test.fixture")(function* () {
     return file;
   });
 
-  return { fs, path, root, write };
+  const lastModified = Effect.fn("Test.lastModified")(function* (file: string, time: string) {
+    const instant = new Date(time);
+    yield* fs.utimes(file, instant, instant);
+  });
+
+  return { fs, path, root, write, lastModified };
 });
 
 function codexUsage(time: string, input = 100, output = 20, cumulative = 100) {
@@ -682,6 +687,80 @@ describe("Ledger reports through the public interface", () => {
       );
     }).pipe(Effect.provide(runtime)),
   );
+
+  it.effect(
+    "leaves transcripts last modified before the window unopened unless named as a source",
+    () =>
+      Effect.gen(function* () {
+        const { write, lastModified, root, path } = yield* fixture();
+
+        const session = (id: string, usage: string) => [
+          JSON.stringify({ type: "session_meta", payload: { id } }),
+          JSON.stringify({ type: "turn_context", payload: { model: "test-model" } }),
+          usage,
+        ];
+
+        yield* write("sessions/recent.jsonl", session("recent", codexUsage("09:01:00")));
+
+        // September 22 in Stockholm starts at 22:00 UTC on the 21st; the slack reaches 36 hours back.
+        yield* lastModified(
+          yield* write("sessions/slack.jsonl", session("slack", codexUsage("09:02:00"))),
+          "2026-09-20T10:00:00Z",
+        );
+
+        const older = yield* write("sessions/older.jsonl", [
+          ...session("older", codexUsage("09:03:00")),
+          "{",
+        ]);
+
+        yield* lastModified(older, "2026-09-20T09:59:59Z");
+        const ledger = yield* Ledger;
+
+        const input = {
+          ...request([{ provider: "codex", path: path.join(root, "sessions") }]),
+          since: "2026-09-22",
+          until: "2026-09-22",
+          timeZone: DateTime.zoneMakeNamedUnsafe("Europe/Stockholm"),
+        };
+
+        const report = yield* ledger.report(input);
+        assert.deepStrictEqual(
+          report.rows.map((row) => row.records),
+          [2],
+        );
+        assert.deepInclude(report.coverage[0], {
+          status: "ok",
+          files: 2,
+          filesBeforeWindow: 1,
+          malformedLines: 0,
+        });
+
+        // An overlapping source counts none of the files again, opened or not.
+        const overlapping = yield* ledger.report({
+          ...input,
+          sources: [...input.sources, ...input.sources],
+        });
+
+        assert.deepInclude(overlapping.coverage[1], { files: 0, filesBeforeWindow: 0 });
+        assert.isNotEmpty(overlapping.coverage[1]?.warnings);
+
+        const named = yield* ledger.report({
+          ...input,
+          sources: [{ provider: "codex", path: older }],
+        });
+
+        assert.deepStrictEqual(
+          named.rows.map((row) => row.records),
+          [1],
+        );
+        assert.deepInclude(named.coverage[0], {
+          status: "partial",
+          files: 1,
+          filesBeforeWindow: 0,
+          malformedLines: 1,
+        });
+      }).pipe(Effect.provide(runtime)),
+  );
 });
 
 describe("Ledger sync payloads through the public interface", () => {
@@ -917,6 +996,81 @@ describe("Ledger sync payloads through the public interface", () => {
     }).pipe(Effect.provide(runtime)),
   );
 
+  it.effect(
+    "replaces a provider whose history all predates the window and reads every Copilot file",
+    () =>
+      Effect.gen(function* () {
+        const { write, lastModified, root, path } = yield* fixture();
+        const at = (directory: string) => path.join(root, directory);
+
+        yield* lastModified(
+          yield* write("codex/older.jsonl", session("older", root, [codexUsage("10:00:00")])),
+          "2026-08-01T00:00:00Z",
+        );
+
+        const span = (spanId: string, attributes: Record<string, string | number>) =>
+          JSON.stringify({
+            type: "span",
+            traceId: "trace",
+            spanId,
+            parentSpanId: spanId === "agent" ? undefined : "agent",
+            endTime: [Date.parse("2026-09-22T10:00:00Z") / 1000, 0],
+            attributes,
+          });
+
+        yield* write("copilot/requests.jsonl", [
+          span("chat", {
+            "gen_ai.operation.name": "chat",
+            "gen_ai.response.model": "test-model",
+            "gen_ai.usage.input_tokens": 100,
+            "gen_ai.usage.output_tokens": 20,
+          }),
+        ]);
+
+        // The request's repository comes from a span in another file of the same source.
+        yield* lastModified(
+          yield* write("copilot/agents.jsonl", [
+            span("agent", {
+              "gen_ai.operation.name": "invoke_agent",
+              "github.copilot.git.repository": "acme/alpha",
+            }),
+          ]),
+          "2026-08-01T00:00:00Z",
+        );
+
+        const ledger = yield* Ledger;
+
+        const payload = yield* ledger.syncPayload(
+          {
+            ...request([
+              { provider: "codex", path: at("codex") },
+              { provider: "copilot", path: at("copilot") },
+            ]),
+            since: "2026-09-22",
+            until: "2026-09-22",
+          },
+          client,
+        );
+
+        assert.deepStrictEqual(
+          payload.coverage.map((entry) => [
+            entry.provider,
+            entry.status,
+            entry.files,
+            entry.filesBeforeWindow,
+          ]),
+          [
+            ["codex", "ok", 0, 1],
+            ["copilot", "ok", 2, 0],
+          ],
+        );
+        assert.deepStrictEqual(
+          payload.buckets.map((bucket) => [bucket.provider, bucket.project]),
+          [["copilot", "acme/alpha"]],
+        );
+      }).pipe(Effect.provide(runtime)),
+  );
+
   it.effect("returns a safe typed failure when report pricing cannot enter a sync payload", () =>
     Effect.gen(function* () {
       const ledger = yield* Ledger;
@@ -943,9 +1097,26 @@ describe("Ledger sync payloads through the public interface", () => {
 
   it.effect("widens windows to whole UTC hours in zones with half-hour offsets", () =>
     Effect.gen(function* () {
-      const { write, root } = yield* fixture();
+      const { write, lastModified, root } = yield* fixture();
       // 00:15 on September 23 in Kolkata, inside the UTC hour that ends September 22's window.
       yield* write("kolkata.jsonl", session("kolkata", root, [codexUsage("18:45:00")]));
+
+      // Before local midnight at 18:30 UTC, but inside the UTC hour that starts the window; the
+      // file's modification time is within the slack of that hour's start only.
+      yield* lastModified(
+        yield* write("widened.jsonl", [
+          ...session("widened", root, []),
+          JSON.stringify({
+            type: "event_msg",
+            timestamp: "2026-09-21T18:10:00Z",
+            payload: {
+              type: "token_count",
+              info: { last_token_usage: { input_tokens: 10, output_tokens: 5 } },
+            },
+          }),
+        ]),
+        "2026-09-20T06:10:00Z",
+      );
       const ledger = yield* Ledger;
 
       const payload = yield* ledger.syncPayload(
@@ -964,7 +1135,7 @@ describe("Ledger sync payloads through the public interface", () => {
       });
       assert.deepStrictEqual(
         payload.buckets.map((bucket) => bucket.hourStart),
-        ["2026-09-22T18:00:00.000Z"],
+        ["2026-09-21T18:00:00.000Z", "2026-09-22T18:00:00.000Z"],
       );
     }).pipe(Effect.provide(runtime)),
   );
