@@ -54,6 +54,55 @@ function codexUsage(time: string, input = 100, output = 20, cumulative = 100) {
   });
 }
 
+function piUsage(input: number, output: number, cacheRead = 0, cacheWrite = 0) {
+  return {
+    input,
+    output,
+    cacheRead,
+    cacheWrite,
+    totalTokens: input + output + cacheRead + cacheWrite,
+  };
+}
+
+function piMessage(
+  id: string,
+  time: string,
+  role: string,
+  usage?: ReturnType<typeof piUsage>,
+  model = "test-model",
+  route = "openai",
+) {
+  return JSON.stringify({
+    type: "message",
+    id,
+    parentId: null,
+    timestamp: `2026-09-22T${time}Z`,
+    message: {
+      role,
+      provider: role === "assistant" ? route : undefined,
+      model: role === "assistant" ? model : undefined,
+      usage,
+    },
+  });
+}
+
+function piEntry(
+  type: string,
+  id: string,
+  time: string,
+  usage?: ReturnType<typeof piUsage>,
+  model?: string,
+) {
+  return JSON.stringify({
+    type,
+    id,
+    parentId: null,
+    timestamp: `2026-09-22T${time}Z`,
+    model,
+    usage,
+  });
+}
+
 function request(sources: readonly Source[]) {
   return ReportRequest.make({
     since: "2026-09-01",
@@ -454,6 +503,135 @@ describe("Ledger reports through the public interface", () => {
         first.rows.map((row) => [row.records, row.tokens.output]),
         [[1, 23]],
       );
+    }).pipe(Effect.provide(runtime)),
+  );
+
+  it.effect("counts Pi usage on every branch, and a fork's copies for their original session", () =>
+    Effect.gen(function* () {
+      const { write, root, path } = yield* fixture();
+      const at = (directory: string) => path.join(root, directory);
+
+      const answer = piMessage("a0000002", "09:00:02", "assistant", piUsage(40, 20, 60, 10));
+      const warmed = piEntry("usage", "a0000006", "09:00:06", piUsage(0, 0, 50), "test-model");
+
+      const parent = yield* write("pi/--work-mapped--/2026-09-22T09-00-00-000Z_parent.jsonl", [
+        JSON.stringify({
+          type: "session",
+          version: 3,
+          id: "parent",
+          timestamp: "2026-09-22T09:00:00Z",
+          cwd: at("mapped"),
+        }),
+        piMessage("a0000001", "09:00:01", "user"),
+        answer,
+        piMessage("a0000003", "09:00:03", "toolResult"),
+        // An aborted response reports no tokens.
+        piMessage("a0000004", "09:00:04", "assistant", piUsage(0, 0)),
+        // A branch later abandoned through /tree was still paid for.
+        piMessage("a0000005", "09:00:05", "assistant", piUsage(10, 5)),
+        warmed,
+        piEntry("compaction", "a0000007", "09:00:07", piUsage(30, 7)),
+        piMessage("a0000008", "09:00:08", "toolResult", piUsage(8, 2)),
+        piEntry("branch_summary", "a0000009", "09:00:09", piUsage(3, 1)),
+        piEntry("compaction", "a000000a", "09:00:10"),
+      ]);
+
+      // Forked into another project, in a directory that is read before the parent's.
+      yield* write("pi/--work-earlier--/2026-09-22T10-00-00-000Z_fork.jsonl", [
+        JSON.stringify({
+          type: "session",
+          version: 3,
+          id: "fork",
+          timestamp: "2026-09-22T10:00:00Z",
+          cwd: at("other"),
+          parentSession: parent,
+        }),
+        answer,
+        warmed,
+        // Copied from a session whose own file is gone: counted here rather than lost.
+        piMessage("d0000001", "08:00:00", "assistant", piUsage(7, 3)),
+        JSON.stringify({
+          type: "message",
+          id: "b0000001",
+          parentId: null,
+          timestamp: "2026-09-22T10:00:01Z",
+          message: {
+            role: "assistant",
+            model: "requested-model",
+            responseModel: "private-model",
+            usage: piUsage(100, 20),
+          },
+        }),
+        // Entry IDs are unique only within a session; this one is not the parent's entry.
+        piMessage("a0000005", "10:00:02", "assistant", piUsage(1, 1)),
+      ]);
+
+      const ledger = yield* Ledger;
+
+      const report = yield* ledger.report({
+        ...request([{ provider: "pi", path: at("pi") }]),
+        projects: [
+          { project: "Client A", paths: [at("mapped")], repositories: [] },
+          { project: "Client B", paths: [at("other")], repositories: [] },
+        ],
+      });
+
+      assert.deepStrictEqual(
+        report.rows.map((row) => [
+          row.project,
+          row.model,
+          row.records,
+          row.tokens,
+          row.estimatedCostUsd === null,
+        ]),
+        [
+          [
+            "Client A",
+            "test-model",
+            3,
+            { input: 50, output: 25, cacheRead: 110, cacheWrite: 10 },
+            false,
+          ],
+          ["Client A", "unknown", 3, { input: 41, output: 10, cacheRead: 0, cacheWrite: 0 }, true],
+          [
+            "Client B",
+            "private-model",
+            1,
+            { input: 100, output: 20, cacheRead: 0, cacheWrite: 0 },
+            true,
+          ],
+          [
+            "Client B",
+            "test-model",
+            2,
+            { input: 8, output: 4, cacheRead: 0, cacheWrite: 0 },
+            false,
+          ],
+        ],
+      );
+      assert.deepInclude(report.coverage[0], {
+        status: "ok",
+        files: 2,
+        duplicates: 2,
+        skippedRecords: 0,
+        warnings: [
+          "Pi tool and summary usage names no model; these tokens remain unpriced unless an explicit rate is supplied.",
+        ],
+      });
+
+      const stamp = { timestamp: "2026-09-22T11:00:00Z", model: "test-model" };
+
+      const invalid = yield* write("pi-invalid.jsonl", [
+        piMessage("c0000001", "11:00:00", "assistant"),
+        piEntry("usage", "c0000002", "11:00:00", piUsage(-1, 5), "test-model"),
+        // Usage in an entry that is otherwise not as documented is lost, never ignored.
+        JSON.stringify({ ...stamp, type: "usage", id: null, usage: piUsage(1, 1) }),
+        JSON.stringify({ ...stamp, type: "usage", id: "c0000004", usage: { input: 1, output: 1 } }),
+      ]);
+
+      const partial = yield* ledger.report(request([{ provider: "pi", path: invalid }]));
+      assert.deepInclude(partial.coverage[0], { status: "partial", skippedRecords: 4 });
+      assert.lengthOf(partial.rows, 0);
     }).pipe(Effect.provide(runtime)),
   );
 
@@ -1011,6 +1189,56 @@ describe("Ledger sync payloads through the public interface", () => {
           ["11", 2],
           ["13", 1],
         ],
+      );
+    }).pipe(Effect.provide(runtime)),
+  );
+
+  it.effect("reports Pi's ChatGPT sign-in for the hours it carried usage, and no other route", () =>
+    Effect.gen(function* () {
+      const { write } = yield* fixture();
+
+      const file = yield* write("pi.jsonl", [
+        JSON.stringify({ type: "session", version: 3, id: "pi-session" }),
+        piMessage(
+          "a0000001",
+          "09:10:00",
+          "assistant",
+          piUsage(10, 5),
+          "test-model",
+          "openai-codex",
+        ),
+        piMessage(
+          "a0000002",
+          "09:50:00",
+          "assistant",
+          piUsage(10, 5),
+          "test-model",
+          "openai-codex",
+        ),
+        // An API key and a route that takes either credential are not evidence of a plan.
+        piMessage("a0000003", "10:10:00", "assistant", piUsage(10, 5)),
+        piMessage("a0000004", "10:20:00", "assistant", piUsage(10, 5), "test-model", "anthropic"),
+        // A request that failed before using tokens ran on no plan.
+        piMessage("a0000005", "11:10:00", "assistant", piUsage(0, 0), "test-model", "openai-codex"),
+      ]);
+
+      const ledger = yield* Ledger;
+
+      const payload = yield* ledger.syncPayload(
+        {
+          ...request([{ provider: "pi", path: file }]),
+          since: "2026-09-22",
+          until: "2026-09-22",
+        },
+        client,
+      );
+
+      assert.deepStrictEqual(payload.providerHints, [
+        { provider: "pi", hourStart: "2026-09-22T09:00:00.000Z", plan: "openai-codex" },
+      ]);
+      assert.strictEqual(
+        payload.buckets.reduce((sum, bucket) => sum + bucket.records, 0),
+        4,
       );
     }).pipe(Effect.provide(runtime)),
   );

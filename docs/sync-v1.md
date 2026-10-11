@@ -86,12 +86,13 @@ A synthetic example:
 window, once, with no session data. They are evidence for toki2 to compare with
 declared subscriptions, which remain authoritative; a missing hint proves nothing.
 
-| Provider    | Signal                                                                                                                                |
-| ----------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| Codex       | `plan_type` on rate-limit updates, such as `pro`, when signed in with ChatGPT. `null` or absent otherwise, including API-key use.     |
-| Claude Code | None: transcripts do not record whether a subscription or an API key was used. `userType` and `service_tier` are not billing signals. |
-| Copilot     | None observed: Copilot CLI and VS Code Chat exports carry no plan, SKU, or entitlement attribute.                                     |
-| Grok Build  | Not investigated yet.                                                                                                                 |
+| Provider    | Signal                                                                                                                                                                                               |
+| ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Codex       | `plan_type` on rate-limit updates, such as `pro`, when signed in with ChatGPT. `null` or absent otherwise, including API-key use.                                                                    |
+| Claude Code | None: transcripts do not record whether a subscription or an API key was used. `userType` and `service_tier` are not billing signals.                                                                |
+| Copilot     | None observed: Copilot CLI and VS Code Chat exports carry no plan, SKU, or entitlement attribute.                                                                                                    |
+| Grok Build  | Not investigated yet.                                                                                                                                                                                |
+| Pi          | `openai-codex` when usage ran through Pi's ChatGPT sign-in, a route with no API-key form. Pi records the route, not the plan, and no other route is sent: `anthropic`, for one, also takes API keys. |
 
 ## Project keys
 
@@ -120,8 +121,8 @@ exceeds `records`, and `estimatedCostUsd` is `null` exactly when `unpricedRecord
 A provider absent from `coverage` was not scanned, for example because of
 `--provider`, and also keeps its stored data. Missing data is never treated as zero.
 
-Transcripts are append-only, so the client does not open a Codex, Claude Code, or Grok
-file last modified more than 36 hours before `window.start`. `files` and the diagnostic
+Transcripts are append-only, so the client does not open a Codex, Claude Code, Grok, or
+Pi file last modified more than 36 hours before `window.start`. `files` and the diagnostic
 counts describe the files opened, and `filesBeforeWindow` counts the rest. A provider
 whose history all predates the window is therefore `ok` with `files` 0, and its stored
 buckets in the window are replaced with none. Copilot exports are always opened.

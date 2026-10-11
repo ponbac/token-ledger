@@ -10,6 +10,8 @@ export interface PlanHint {
 /** Internal parser output distinguishes unrelated lines from lost usage. */
 export interface ParseResult {
   readonly records: readonly UsageRecord[];
+  /** Records a forked session copied from its parent, counted only where no original is read. */
+  readonly inherited: readonly UsageRecord[];
   readonly hints: readonly PlanHint[];
   readonly malformed: number;
   readonly skipped: number;
@@ -25,6 +27,7 @@ export interface TranscriptParser {
 /** An unrelated or already-counted provider event. */
 export const empty: ParseResult = {
   records: [],
+  inherited: [],
   hints: [],
   malformed: 0,
   skipped: 0,

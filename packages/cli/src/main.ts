@@ -85,7 +85,7 @@ function usageFlags(sinceDefault: string, strict: string) {
         "IANA time zone for days and the window, such as Europe/Stockholm; defaults to the system zone",
       ),
     ),
-    provider: Flag.Literals("provider", ["all", "codex", "claude", "grok", "copilot"]).pipe(
+    provider: Flag.Literals("provider", ["all", "codex", "claude", "grok", "copilot", "pi"]).pipe(
       Flag.withDefault("all"),
     ),
     project: Flag.String("project").pipe(
@@ -164,6 +164,12 @@ const usageRequest = Effect.fn("CLI.usageRequest")(function* (
 
   const copilotFile = yield* Config.String("COPILOT_OTEL_FILE_EXPORTER_PATH").pipe(Config.option);
 
+  const piHome = yield* Config.String("PI_CODING_AGENT_DIR").pipe(
+    Config.withDefault(path.join(home, ".pi", "agent")),
+  );
+
+  const piSessions = yield* Config.String("PI_CODING_AGENT_SESSION_DIR").pipe(Config.option);
+
   const defaults: Source[] = [
     { provider: "codex", path: path.join(expand(codexHome), "sessions") },
     { provider: "codex", path: path.join(expand(codexHome), "archived_sessions") },
@@ -173,6 +179,13 @@ const usageRequest = Effect.fn("CLI.usageRequest")(function* (
       provider: "copilot",
       path: Option.match(copilotFile, {
         onNone: () => path.join(expand(copilotHome), "otel"),
+        onSome: (value) => expand(value),
+      }),
+    },
+    {
+      provider: "pi",
+      path: Option.match(piSessions, {
+        onNone: () => path.join(expand(piHome), "sessions"),
         onSome: (value) => expand(value),
       }),
     },
@@ -192,7 +205,7 @@ const usageRequest = Effect.fn("CLI.usageRequest")(function* (
   if (Option.isSome(flags.source)) {
     if (flags.provider === "all")
       return yield* new CliError({
-        message: "--source requires --provider codex, claude, grok, or copilot.",
+        message: "--source requires --provider codex, claude, grok, copilot, or pi.",
       });
     sources = [{ provider: flags.provider, path: expand(flags.source.value) }];
   }
@@ -509,7 +522,7 @@ const scheduleInstall = Command.make(
       Flag.optional,
       Flag.withDescription("IANA time zone for the scheduled sync; defaults to the system zone"),
     ),
-    provider: Flag.Literals("provider", ["all", "codex", "claude", "grok", "copilot"]).pipe(
+    provider: Flag.Literals("provider", ["all", "codex", "claude", "grok", "copilot", "pi"]).pipe(
       Flag.withDefault("all"),
     ),
     dryRun: Flag.Boolean("dry-run").pipe(

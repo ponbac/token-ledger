@@ -30,6 +30,7 @@ import { codexParser } from "./providers/codex.ts";
 import { copilotDatabaseLines, type CopilotDatabaseError } from "./providers/copilot-db.ts";
 import { copilotParser } from "./providers/copilot.ts";
 import { grokParser } from "./providers/grok.ts";
+import { piParser } from "./providers/pi.ts";
 import type { ParseResult } from "./providers/shared.ts";
 import {
   type ObservedPlan,
@@ -134,6 +135,24 @@ export class Ledger extends Context.Service<
           const warnings = new Set<string>();
 
           const copilot = source.provider === "copilot" ? copilotParser(source.path) : undefined;
+          // Copies wait for the rest of the source, so whichever file holds the original wins.
+          const inherited: Array<readonly [UsageRecord, Slot]> = [];
+
+          const place = Effect.fn("Ledger.placeRecord")(function* (
+            record: UsageRecord,
+            slot: Slot,
+          ) {
+            const id = `${record.provider}:${record.id}`;
+
+            if (seen.has(id)) {
+              duplicates++;
+
+              return;
+            }
+
+            seen.add(id);
+            collect(record, yield* resolveProject(record, source.project), slot);
+          });
 
           const accept = Effect.fn("Ledger.acceptRecords")(function* (result: ParseResult) {
             malformedLines += result.malformed;
@@ -149,16 +168,14 @@ export class Ledger extends Context.Service<
             for (const record of result.records) {
               const slot = locate(record.timestamp);
 
-              if (slot === undefined || totalTokens(record.tokens) === 0) continue;
-              const id = `${record.provider}:${record.id}`;
+              if (slot !== undefined && totalTokens(record.tokens) > 0) yield* place(record, slot);
+            }
 
-              if (seen.has(id)) {
-                duplicates++;
-                continue;
-              }
+            for (const record of result.inherited) {
+              const slot = locate(record.timestamp);
 
-              seen.add(id);
-              collect(record, yield* resolveProject(record, source.project), slot);
+              if (slot !== undefined && totalTokens(record.tokens) > 0)
+                inherited.push([record, slot]);
             }
           });
 
@@ -192,6 +209,7 @@ export class Ledger extends Context.Service<
               Match.when("claude", () => claudeParser(canonical)),
               Match.when("grok", () => grokParser(canonical)),
               Match.when("copilot", () => copilot ?? copilotParser(canonical)),
+              Match.when("pi", () => piParser(canonical)),
               Match.exhaustive,
             );
 
@@ -256,6 +274,8 @@ export class Ledger extends Context.Service<
           }
 
           if (copilot?.finish !== undefined) yield* accept(copilot.finish());
+
+          for (const [record, slot] of inherited) yield* place(record, slot);
 
           const status = missingRoot
             ? "missing"
