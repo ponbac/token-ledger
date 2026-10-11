@@ -77,7 +77,7 @@ suite("systemd user timer", () => {
       // systemd 261 ran these bytes and passed the flags through exactly as given.
       assert.include(
         yield* fs.readFileString(path.join(directory, "token-ledger-sync.service")),
-        `ExecStart=/bin/sh -lc "export XDG_CONFIG_HOME='/home/me/my config'; export PATH='/opt/node 24/bin':\\"$$PATH\\"; exec npx --yes @ponbac/token-ledger@latest sync --config '/tmp/my cfg/it'\\\\''s $$HOME %%h \\"x\\" \\\\ & <b>.json' --time-zone Europe/Stockholm"\n`,
+        `ExecStart=/bin/sh -lc "cd /; export XDG_CONFIG_HOME='/home/me/my config'; export PATH='/opt/node 24/bin':\\"$$PATH\\"; exec npx --yes @ponbac/token-ledger@latest sync --config '/tmp/my cfg/it'\\\\''s $$HOME %%h \\"x\\" \\\\ & <b>.json' --time-zone Europe/Stockholm"\n`,
       );
       assert.include(
         yield* fs.readFileString(path.join(directory, "token-ledger-sync.timer")),
@@ -180,7 +180,7 @@ suite("launchd agent", () => {
 
       assert.include(
         contents,
-        `<string>export XDG_CONFIG_HOME='/home/me/my config'; export PATH='/opt/node 24/bin':"$PATH"; exec npx --yes @ponbac/token-ledger@latest sync --config '/tmp/my cfg/it'\\''s $HOME %h "x" \\ &amp; &lt;b&gt;.json' --time-zone Europe/Stockholm</string>`,
+        `<string>cd /; export XDG_CONFIG_HOME='/home/me/my config'; export PATH='/opt/node 24/bin':"$PATH"; exec npx --yes @ponbac/token-ledger@latest sync --config '/tmp/my cfg/it'\\''s $HOME %h "x" \\ &amp; &lt;b&gt;.json' --time-zone Europe/Stockholm</string>`,
       );
       assert.match(contents, /<key>Hour<\/key>\s*<integer>7<\/integer>/);
       assert.match(contents, /<key>Minute<\/key>\s*<integer>5<\/integer>/);

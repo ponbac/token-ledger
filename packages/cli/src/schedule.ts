@@ -105,6 +105,9 @@ const posixWord = (value: string) =>
  */
 const posixScript = (job: ScheduledSync) =>
   [
+    // systemd starts user services in the home directory, where sync would pick up a
+    // stray `token-ledger.json`; only `--config` selects a configuration for the job.
+    "cd /",
     ...Option.toArray(job.configHome).map(
       (directory) => `export XDG_CONFIG_HOME=${posixWord(directory)}`,
     ),
