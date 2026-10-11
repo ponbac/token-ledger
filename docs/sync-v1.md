@@ -79,6 +79,19 @@ A synthetic example:
 | `coverage[]`       | One entry per scanned provider, with file and diagnostic counts; `status` decides replacement (below).                      |
 | `providerHints[]`  | Optional `{ provider, hourStart, plan }` evidence of a billing plan, such as Codex `plan_type`. Declared subscriptions win. |
 
+## Plan hints
+
+`providerHints` lists each billing plan a provider reported during an hour of the
+window, once, with no session data. They are evidence for toki2 to compare with
+declared subscriptions, which remain authoritative; a missing hint proves nothing.
+
+| Provider    | Signal                                                                                                                                |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| Codex       | `plan_type` on rate-limit updates, such as `pro`, when signed in with ChatGPT. `null` or absent otherwise, including API-key use.     |
+| Claude Code | None: transcripts do not record whether a subscription or an API key was used. `userType` and `service_tier` are not billing signals. |
+| Copilot     | None observed: Copilot CLI and VS Code Chat exports carry no plan, SKU, or entitlement attribute.                                     |
+| Grok Build  | Not investigated yet.                                                                                                                 |
+
 ## Project keys
 
 - A configured project name, such as `Client A`, from the developer's token-ledger configuration.
