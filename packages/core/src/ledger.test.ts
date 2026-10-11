@@ -784,6 +784,24 @@ describe("Ledger reports through the public interface", () => {
           filesBeforeWindow: 0,
           malformedLines: 1,
         });
+
+        // Naming the file still reads it after a directory source left it unopened.
+        const both = yield* ledger.report({
+          ...input,
+          sources: [...input.sources, { provider: "codex", path: older }],
+        });
+
+        assert.deepStrictEqual(
+          both.rows.map((row) => row.records),
+          [3],
+        );
+        assert.deepStrictEqual(
+          both.coverage.map((entry) => [entry.files, entry.filesBeforeWindow]),
+          [
+            [2, 1],
+            [1, 0],
+          ],
+        );
       }).pipe(Effect.provide(runtime)),
   );
 });

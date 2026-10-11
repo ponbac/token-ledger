@@ -119,6 +119,8 @@ export class Ledger extends Context.Service<
 
         const seen = new Set<string>();
         const visitedFiles = new Set<string>();
+        // Counted without being opened; a later source naming one of these files still reads it.
+        const settledFiles = new Set<string>();
         const coverage: Coverage[] = [];
 
         for (const source of request.sources) {
@@ -166,8 +168,9 @@ export class Ledger extends Context.Service<
           ) {
             const canonical = yield* fs.realPath(file);
             const identity = `${source.provider}:${canonical}`;
+            const settled = settledBefore(source, file, info, start - modifiedSlack);
 
-            if (visitedFiles.has(identity)) {
+            if (visitedFiles.has(identity) || (settled && settledFiles.has(identity))) {
               warnings.add(
                 "An overlapping source was counted once; the first source's project override wins.",
               );
@@ -175,13 +178,14 @@ export class Ledger extends Context.Service<
               return;
             }
 
-            visitedFiles.add(identity);
-
-            if (settledBefore(source, file, info, start - modifiedSlack)) {
+            if (settled) {
+              settledFiles.add(identity);
               filesBeforeWindow++;
 
               return;
             }
+
+            visitedFiles.add(identity);
 
             const parser = Match.value(source.provider).pipe(
               Match.when("codex", () => codexParser(canonical)),
