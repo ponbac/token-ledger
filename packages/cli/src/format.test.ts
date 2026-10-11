@@ -5,9 +5,10 @@ import { csv, table } from "./format.ts";
 
 function report(costs: readonly number[], unpriced = false) {
   return UsageReport.make({
-    version: 1,
+    version: 2,
     since: "2026-09-01",
     until: "2026-09-30",
+    timeZone: "Europe/Stockholm",
     currency: "USD",
     costBasis: "api-equivalent",
     pricing: { status: "custom", fetchedAt: null, source: "fixture" },
@@ -32,6 +33,7 @@ function report(costs: readonly number[], unpriced = false) {
 it("shows each project's share of the unrounded total in wide and narrow tables", () => {
   for (const columns of [160, 60]) {
     const output = table(report([0.001, 0.002, 0.007]), columns);
+    assert.include(output, "2026-09-01 through 2026-09-30 (Europe/Stockholm)");
     assert.include(output, "Cost %");
     assert.match(output, /Beta[\s\S]*70\.0%[\s\S]*Alpha[\s\S]*30\.0%[\s\S]*Total[\s\S]*100\.0%/);
   }

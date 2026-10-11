@@ -83,7 +83,7 @@ export interface UsageRecord {
   readonly tokens: Tokens;
 }
 
-/** UTC calendar day. Invalid dates such as February 30 are rejected. */
+/** Zone-free `YYYY-MM-DD` calendar day. Invalid dates such as February 30 are rejected. */
 export const Day = Schema.String.check(
   Schema.isPattern(/^\d{4}-\d{2}-\d{2}$/),
   Schema.makeFilter((s) => {
@@ -93,10 +93,14 @@ export const Day = Schema.String.check(
   }),
 );
 
-/** Inclusive UTC day window and all inputs to a report. Paths must be absolute. */
+/** A calendar day; a time zone gives it instants. */
+export type Day = typeof Day.Type;
+
+/** Inclusive local calendar days in a named time zone and all inputs to a report. Paths must be absolute. */
 export const ReportRequest = Schema.Struct({
   since: Day,
   until: Day,
+  timeZone: Schema.TimeZoneNamed,
   sources: Schema.Array(Source),
   projects: Schema.Array(ProjectMapping),
   pricing: PriceBook,
@@ -120,7 +124,7 @@ export const Coverage = Schema.Struct({
 /** Completeness evidence, not a guarantee that the provider retained all history. */
 export interface Coverage extends Schema.Schema.Type<typeof Coverage> {}
 
-/** One project/day/provider/model aggregate. Null cost means some tokens could not be priced. */
+/** One project/day/provider/model aggregate, by local day. Null cost means some tokens could not be priced. */
 export const ReportRow = Schema.Struct({
   project: Schema.String,
   day: Day,
@@ -137,11 +141,12 @@ export const ReportRow = Schema.Struct({
 /** Serializable aggregate usable by terminal and browser clients. */
 export interface ReportRow extends Schema.Schema.Type<typeof ReportRow> {}
 
-/** Versioned report; contains no raw transcript content. */
+/** Versioned report; contains no raw transcript content. Version 2 days are local to `timeZone`, an IANA name; version 1 used UTC days. */
 export const UsageReport = Schema.Struct({
-  version: Schema.Literal(1),
+  version: Schema.Literal(2),
   since: Day,
   until: Day,
+  timeZone: Schema.NonEmptyString,
   currency: Schema.Literal("USD"),
   costBasis: Schema.Literal("api-equivalent"),
   pricing: Schema.Struct({
