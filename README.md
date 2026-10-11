@@ -361,7 +361,8 @@ Run it on **every machine** where you use a coding agent, and schedule it daily.
    ```
 
    `login` asks for the server URL and the token, then writes them to `sync.json` in
-   your settings directory, readable only by you:
+   your settings directory with mode 600. Windows ignores the mode; there the file is
+   as private as the directory, and `%APPDATA%` is yours alone:
 
    | Platform | Settings directory                                            |
    | -------- | ------------------------------------------------------------- |
@@ -422,6 +423,8 @@ does not keep a process running. Run it again to change the job.
 
 The job needs the server and token saved by `login`: it cannot read `--token` or
 variables set only in your shell, such as `TOKI_API_TOKEN` or `CLAUDE_CONFIG_DIR`.
+The exception is `XDG_CONFIG_HOME`, which `schedule install` copies into the job so
+that it reads the same settings directory.
 It runs `npx --yes @ponbac/token-ledger@latest sync`, so it stays up to date. It
 looks for `npx` beside the Node that ran `schedule install` and then on the
 scheduler's `PATH`, so it survives removing that Node version when another is on the

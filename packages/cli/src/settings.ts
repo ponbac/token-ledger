@@ -25,6 +25,16 @@ const SyncSettings = Schema.Struct({
   token: Schema.optionalKey(Schema.RedactedFromValue(Schema.NonEmptyString)),
 });
 
+/** `XDG_CONFIG_HOME` when it is set to an absolute path; a relative value is ignored. */
+export const configHome = Effect.gen(function* () {
+  const path = yield* Path.Path;
+
+  return yield* Config.String("XDG_CONFIG_HOME").pipe(
+    Config.option,
+    Effect.map(Option.filter((directory) => path.isAbsolute(directory))),
+  );
+});
+
 /**
  * The per-user token-ledger directory: `$XDG_CONFIG_HOME/token-ledger` when set, otherwise
  * `%APPDATA%` on Windows, `~/Library/Application Support` on macOS, or `~/.config`.
@@ -32,11 +42,7 @@ const SyncSettings = Schema.Struct({
 export const settingsDirectory = Effect.gen(function* () {
   const path = yield* Path.Path;
   const home = homedir();
-
-  const xdg = yield* Config.String("XDG_CONFIG_HOME").pipe(
-    Config.option,
-    Effect.map(Option.filter((directory) => path.isAbsolute(directory))),
-  );
+  const xdg = yield* configHome;
 
   const appData = yield* Config.String("APPDATA").pipe(Config.option);
 
@@ -119,9 +125,9 @@ export const loadSyncSettings = Effect.fn("Settings.loadSync")(function* (direct
 });
 
 /**
- * Replaces `sync.json` with the server and token, readable only by this user. The file is
- * complete before it takes the name, so a concurrent sync never reads half of it. Errors
- * never contain the token.
+ * Replaces `sync.json` with the server and token, with mode 600. Windows ignores the mode, so
+ * there the file is as private as its directory. The file is complete before it takes the
+ * name, so a concurrent sync never reads half of it. Errors never contain the token.
  */
 export const saveSyncSettings = Effect.fn("Settings.saveSync")(function* (
   directory: string,

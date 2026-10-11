@@ -1,7 +1,9 @@
 import { homedir, userInfo } from "node:os";
 
-import { Config, Data, Effect, FileSystem, Match, Option, Path, Schema } from "effect";
+import { Data, Effect, FileSystem, Match, Option, Path, Schema } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
+
+import { configHome } from "./settings.ts";
 
 /** The OS scheduler could not be used, or a value cannot be written safely into its job. */
 export class ScheduleError extends Schema.TaggedError<ScheduleError>()("ScheduleError", {
@@ -19,15 +21,24 @@ export interface ScheduledSync {
   readonly at: TimeOfDay;
   /** Directory of the Node that ran `schedule install`, searched before the job's own `PATH`. */
   readonly nodeDirectory: string;
+  /**
+   * The `XDG_CONFIG_HOME` that `schedule install` ran with. The job exports it, so it reads
+   * the settings `login` saved even when the scheduler's environment lacks the variable.
+   */
+  readonly configHome: Option.Option<string>;
   /** Flags forwarded to `sync`. */
   readonly flags: ReadonlyArray<string>;
 }
 
 /**
- * One step of changing or inspecting the scheduler. A `required` command must exit 0; a
- * `reported` command shows its output and any exit code is accepted; a `silent` command is
- * attempted with its output and outcome discarded.
+ * How a command's result is treated. A `required` command must exit 0. A `reported` command
+ * shows its output and any exit code is accepted. A `silent` command is attempted with its
+ * output and outcome discarded. An `absent` command asks whether the job still exists: its
+ * output is discarded, and exit 0 is the failure.
  */
+type Outcome = "required" | "reported" | "silent" | "absent";
+
+/** One step of changing or inspecting the scheduler. */
 export type Action = Data.TaggedEnum<{
   Write: { readonly file: string; readonly contents: string };
   Remove: { readonly file: string };
@@ -35,7 +46,7 @@ export type Action = Data.TaggedEnum<{
     readonly program: string;
     readonly args: ReadonlyArray<string>;
     readonly shown: string;
-    readonly outcome: "required" | "reported" | "silent";
+    readonly outcome: Outcome;
     readonly hint: string;
   };
 }>;
@@ -61,12 +72,7 @@ const task = "token-ledger sync";
 
 const packageSpec = "@ponbac/token-ledger@latest";
 
-function run(
-  outcome: "required" | "reported" | "silent",
-  program: string,
-  args: ReadonlyArray<string>,
-  hint = "",
-) {
+function run(outcome: Outcome, program: string, args: ReadonlyArray<string>, hint = "") {
   return Action.Run({ program, args, shown: [program, ...args].join(" "), outcome, hint });
 }
 
@@ -76,7 +82,9 @@ function quotable(
   forbidden: RegExp,
   described: string,
 ): Effect.Effect<ScheduledSync, ScheduleError, never> {
-  const offending = [job.nodeDirectory, ...job.flags].find((value) => forbidden.test(value));
+  const offending = [job.nodeDirectory, ...Option.toArray(job.configHome), ...job.flags].find(
+    (value) => forbidden.test(value),
+  );
 
   return offending === undefined
     ? Effect.succeed(job)
@@ -96,7 +104,13 @@ const posixWord = (value: string) =>
  * still finds `npx`.
  */
 const posixScript = (job: ScheduledSync) =>
-  `export PATH=${posixWord(job.nodeDirectory)}:"$PATH"; exec npx --yes ${packageSpec} ${["sync", ...job.flags].map(posixWord).join(" ")}`;
+  [
+    ...Option.toArray(job.configHome).map(
+      (directory) => `export XDG_CONFIG_HOME=${posixWord(directory)}`,
+    ),
+    `export PATH=${posixWord(job.nodeDirectory)}:"$PATH"`,
+    `exec npx --yes ${packageSpec} ${["sync", ...job.flags].map(posixWord).join(" ")}`,
+  ].join("; ");
 
 const posixJob = (job: ScheduledSync) => quotable(job, /\p{Cc}/u, "a control character");
 
@@ -116,7 +130,7 @@ export function systemdTimer(directory: string): Scheduler {
   const service = `${directory}/${unit}.service`;
   const timer = `${directory}/${unit}.timer`;
 
-  const systemctl = (outcome: "required" | "reported", args: ReadonlyArray<string>, hint = "") =>
+  const systemctl = (outcome: Outcome, args: ReadonlyArray<string>, hint = "") =>
     run(outcome, "systemctl", ["--user", ...args], hint);
 
   return {
@@ -166,6 +180,11 @@ WantedBy=timers.target
       Action.Remove({ file: service }),
       Action.Remove({ file: timer }),
       systemctl("reported", ["daemon-reload"]),
+      systemctl(
+        "absent",
+        ["is-active", "--quiet", `${unit}.timer`],
+        "The timer is still active; systemd's reason is shown above.",
+      ),
     ],
     status: [systemctl("reported", ["status", "--no-pager", `${unit}.timer`, `${unit}.service`])],
   };
@@ -192,8 +211,7 @@ export function launchAgent(home: string, uid: number): Scheduler {
           const [hour, minute] = job.at.split(":").map(Number);
 
           return [
-            // Replacing a loaded agent requires unloading it; a first install has none.
-            run("silent", "launchctl", ["bootout", `${domain}/${label}`]),
+            // Written first: a plist that cannot be written leaves the loaded agent running.
             Action.Write({
               file: plist,
               contents: `<?xml version="1.0" encoding="UTF-8"?>
@@ -225,6 +243,8 @@ export function launchAgent(home: string, uid: number): Scheduler {
 </plist>
 `,
             }),
+            // Replacing a loaded agent requires unloading it; a first install has none.
+            run("silent", "launchctl", ["bootout", `${domain}/${label}`]),
             run("required", "launchctl", ["bootstrap", domain, plist]),
           ];
         }),
@@ -232,6 +252,12 @@ export function launchAgent(home: string, uid: number): Scheduler {
     uninstall: [
       run("reported", "launchctl", ["bootout", `${domain}/${label}`]),
       Action.Remove({ file: plist }),
+      run(
+        "absent",
+        "launchctl",
+        ["print", `${domain}/${label}`],
+        "The agent is still loaded; launchd's reason is shown above.",
+      ),
     ],
     status: [run("reported", "launchctl", ["print", `${domain}/${label}`])],
   };
@@ -249,15 +275,22 @@ const powershellString = (value: string) => `'${value.replaceAll("'", "''")}'`;
 export const taskScheduler: Scheduler = {
   name: "Task Scheduler task",
   install: (job) =>
-    // cmd.exe expands `%` even inside quotes and has no escape for a quote within them.
+    // cmd.exe expands `%` even inside quotes and has no escape for a quote within them;
+    // `/v:off` keeps `!` literal where delayed expansion is enabled machine-wide.
     quotable(job, /[\p{Cc}"%]/u, 'a control character, `"`, or `%`').pipe(
       Effect.map((job) => {
-        const command = `set "PATH=${job.nodeDirectory};%PATH%" && npx --yes ${packageSpec} ${["sync", ...job.flags].map(cmdWord).join(" ")}`;
+        const command = [
+          ...Option.toArray(job.configHome).map(
+            (directory) => `set "XDG_CONFIG_HOME=${directory}"`,
+          ),
+          `set "PATH=${job.nodeDirectory};%PATH%"`,
+          `npx --yes ${packageSpec} ${["sync", ...job.flags].map(cmdWord).join(" ")}`,
+        ].join(" && ");
 
         const script = [
           "$ErrorActionPreference = 'Stop'",
           "$ProgressPreference = 'SilentlyContinue'",
-          `$action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument ${powershellString(`/d /s /c "${command}"`)}`,
+          `$action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument ${powershellString(`/d /v:off /s /c "${command}"`)}`,
           `$trigger = New-ScheduledTaskTrigger -Daily -At '${job.at}'`,
           "$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries",
           `Register-ScheduledTask -TaskName ${powershellString(task)} -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null`,
@@ -276,7 +309,15 @@ export const taskScheduler: Scheduler = {
         ];
       }),
     ),
-  uninstall: [run("reported", "schtasks.exe", ["/Delete", "/TN", task, "/F"])],
+  uninstall: [
+    run("reported", "schtasks.exe", ["/Delete", "/TN", task, "/F"]),
+    run(
+      "absent",
+      "schtasks.exe",
+      ["/Query", "/TN", task],
+      "The task is still registered; Task Scheduler's reason is shown above.",
+    ),
+  ],
   status: [run("reported", "schtasks.exe", ["/Query", "/TN", task, "/V", "/FO", "LIST"])],
 };
 
@@ -285,17 +326,10 @@ export const hostScheduler = Effect.gen(function* () {
   const path = yield* Path.Path;
   const home = homedir();
 
-  const configHome = yield* Config.String("XDG_CONFIG_HOME").pipe(
-    Config.option,
-    Effect.map(Option.filter((directory) => path.isAbsolute(directory))),
-    Effect.map(Option.getOrElse(() => path.join(home, ".config"))),
-    Effect.orDie,
-  );
+  const units = Option.getOrElse(yield* configHome, () => path.join(home, ".config"));
 
   return yield* Match.value(process.platform).pipe(
-    Match.when("linux", () =>
-      Effect.succeed(systemdTimer(path.join(configHome, "systemd", "user"))),
-    ),
+    Match.when("linux", () => Effect.succeed(systemdTimer(path.join(units, "systemd", "user")))),
     Match.when("darwin", () => Effect.succeed(launchAgent(home, userInfo().uid))),
     Match.when("win32", () => Effect.succeed(taskScheduler)),
     Match.orElse((platform) =>
@@ -322,8 +356,9 @@ export const describe = (actions: ReadonlyArray<Action>) =>
 
 /**
  * Carries out actions in order, creating parent directories for written files. Stops with a
- * `ScheduleError` at the first file that cannot be changed, command that cannot be started, or
- * `required` command that exits non-zero.
+ * `ScheduleError` at the first file that cannot be changed, `required` or `reported` command
+ * that cannot be started, `required` command that exits non-zero, or `absent` command that
+ * exits 0.
  */
 export const perform = Effect.fn("Schedule.perform")(function* (actions: ReadonlyArray<Action>) {
   const fs = yield* FileSystem.FileSystem;
@@ -342,7 +377,7 @@ export const perform = Effect.fn("Schedule.perform")(function* (actions: Readonl
           .remove(file, { force: true })
           .pipe(Effect.mapError(() => new ScheduleError({ message: `Cannot remove ${file}.` }))),
       Run: ({ program, args, outcome, hint }) => {
-        const output = outcome === "silent" ? "ignore" : "inherit";
+        const output = outcome === "silent" || outcome === "absent" ? "ignore" : "inherit";
 
         const exit = spawner
           .exitCode(
@@ -368,6 +403,16 @@ export const perform = Effect.fn("Schedule.perform")(function* (actions: Readonl
           ),
           Match.when("reported", () => exit),
           Match.when("silent", () => Effect.ignore(exit)),
+          // A scheduler that cannot be started holds no job.
+          Match.when("absent", () =>
+            exit.pipe(
+              Effect.orElseSucceed(() => 1),
+              Effect.filterOrFail(
+                (code) => code !== 0,
+                () => new ScheduleError({ message: hint }),
+              ),
+            ),
+          ),
           Match.exhaustive,
         );
       },

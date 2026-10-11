@@ -1,6 +1,6 @@
 import { NodeServices } from "@effect/platform-node";
 import { assert, describe as suite, it } from "@effect/vitest";
-import { Effect, FileSystem, Path, PlatformError, Result, Sink, Stream } from "effect";
+import { Effect, FileSystem, Option, Path, PlatformError, Result, Sink, Stream } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import {
@@ -18,6 +18,7 @@ const awkward = `/tmp/my cfg/it's $HOME %h "x" \\ & <b>.json`;
 const job: ScheduledSync = {
   at: "07:05",
   nodeDirectory: "/opt/node 24/bin",
+  configHome: Option.some("/home/me/my config"),
   flags: ["--config", awkward, "--time-zone", "Europe/Stockholm"],
 };
 
@@ -76,7 +77,7 @@ suite("systemd user timer", () => {
       // systemd 261 ran these bytes and passed the flags through exactly as given.
       assert.include(
         yield* fs.readFileString(path.join(directory, "token-ledger-sync.service")),
-        `ExecStart=/bin/sh -lc "export PATH='/opt/node 24/bin':\\"$$PATH\\"; exec npx --yes @ponbac/token-ledger@latest sync --config '/tmp/my cfg/it'\\\\''s $$HOME %%h \\"x\\" \\\\ & <b>.json' --time-zone Europe/Stockholm"\n`,
+        `ExecStart=/bin/sh -lc "export XDG_CONFIG_HOME='/home/me/my config'; export PATH='/opt/node 24/bin':\\"$$PATH\\"; exec npx --yes @ponbac/token-ledger@latest sync --config '/tmp/my cfg/it'\\\\''s $$HOME %%h \\"x\\" \\\\ & <b>.json' --time-zone Europe/Stockholm"\n`,
       );
       assert.include(
         yield* fs.readFileString(path.join(directory, "token-ledger-sync.timer")),
@@ -133,7 +134,25 @@ suite("systemd user timer", () => {
         "systemctl --user disable --now token-ledger-sync.timer",
         "systemctl --user clean --what=state token-ledger-sync.timer",
         "systemctl --user daemon-reload",
+        "systemctl --user is-active --quiet token-ledger-sync.timer",
       ]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("fails an uninstall that leaves the timer running", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const directory = yield* fs.makeTempDirectoryScoped();
+
+      // systemd refuses to stop the timer, which therefore still reports itself active.
+      const { spawner } = scheduler((line) => (line.includes("is-active") ? 0 : 1));
+
+      const outcome = yield* perform(systemdTimer(directory).uninstall).pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Effect.result,
+      );
+
+      assert.match(Result.isFailure(outcome) ? outcome.failure.message : "", /still active/);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 });
@@ -161,7 +180,7 @@ suite("launchd agent", () => {
 
       assert.include(
         contents,
-        `<string>export PATH='/opt/node 24/bin':"$PATH"; exec npx --yes @ponbac/token-ledger@latest sync --config '/tmp/my cfg/it'\\''s $HOME %h "x" \\ &amp; &lt;b&gt;.json' --time-zone Europe/Stockholm</string>`,
+        `<string>export XDG_CONFIG_HOME='/home/me/my config'; export PATH='/opt/node 24/bin':"$PATH"; exec npx --yes @ponbac/token-ledger@latest sync --config '/tmp/my cfg/it'\\''s $HOME %h "x" \\ &amp; &lt;b&gt;.json' --time-zone Europe/Stockholm</string>`,
       );
       assert.match(contents, /<key>Hour<\/key>\s*<integer>7<\/integer>/);
       assert.match(contents, /<key>Minute<\/key>\s*<integer>5<\/integer>/);
@@ -169,6 +188,26 @@ suite("launchd agent", () => {
         "launchctl bootout gui/501/com.github.ponbac.token-ledger.sync",
         `launchctl bootstrap gui/501 ${plist}`,
       ]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("leaves a loaded agent running when its replacement cannot be written", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const home = yield* fs.makeTempDirectoryScoped();
+      const { lines, spawner } = scheduler(() => 0);
+
+      // A file where the directory belongs makes the plist unwritable.
+      yield* fs.writeFileString(path.join(home, "Library"), "");
+
+      const outcome = yield* perform(yield* launchAgent(home, 501).install(job)).pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Effect.result,
+      );
+
+      assert.isTrue(Result.isFailure(outcome));
+      assert.deepStrictEqual(lines, []);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 });
@@ -181,6 +220,7 @@ suite("Task Scheduler task", () => {
       const actions = yield* taskScheduler.install({
         at: "07:05",
         nodeDirectory: "C:\\Program Files\\nodejs",
+        configHome: Option.some("D:\\my config"),
         flags: ["--config", "C:\\Users\\O'Neil & Co\\token-ledger.json"],
       });
 
@@ -195,7 +235,7 @@ suite("Task Scheduler task", () => {
       assert.include(describe(actions), script);
       assert.include(
         script,
-        `-Argument '/d /s /c "set "PATH=C:\\Program Files\\nodejs;%PATH%" && npx --yes @ponbac/token-ledger@latest sync --config "C:\\Users\\O''Neil & Co\\token-ledger.json""'`,
+        `-Argument '/d /v:off /s /c "set "XDG_CONFIG_HOME=D:\\my config" && set "PATH=C:\\Program Files\\nodejs;%PATH%" && npx --yes @ponbac/token-ledger@latest sync --config "C:\\Users\\O''Neil & Co\\token-ledger.json""'`,
       );
       assert.include(script, "-Daily -At '07:05'");
     }).pipe(Effect.provide(NodeServices.layer)),
@@ -205,7 +245,12 @@ suite("Task Scheduler task", () => {
     Effect.gen(function* () {
       for (const file of ["C:\\100%\\token-ledger.json", 'C:\\a"b\\token-ledger.json']) {
         const outcome = yield* taskScheduler
-          .install({ at: "12:30", nodeDirectory: "C:\\nodejs", flags: ["--config", file] })
+          .install({
+            at: "12:30",
+            nodeDirectory: "C:\\nodejs",
+            configHome: Option.none(),
+            flags: ["--config", file],
+          })
           .pipe(Effect.result);
 
         assert.isTrue(Result.isFailure(outcome), file);

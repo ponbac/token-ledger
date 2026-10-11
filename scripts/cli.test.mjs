@@ -43,6 +43,10 @@ const decodeMachine = Schema.decodeUnknownSync(Schema.fromJsonString(SyncMachine
 
 const decodeAddress = Schema.decodeUnknownSync(Schema.Struct({ port: Schema.Number }));
 
+const decodeSettings = Schema.decodeUnknownSync(
+  Schema.fromJsonString(Schema.Struct({ server: Schema.String, token: Schema.String })),
+);
+
 await test("npm artifact installs offline and exports reports with correct coverage and exit codes", () => {
   const directory = mkdtempSync(join(tmpdir(), "token-ledger-cli-"));
 
@@ -371,6 +375,7 @@ await test("login saves what a scheduled sync needs, and schedule install change
     assert.equal(plan.status, 0, plan.stderr);
     assert.match(plan.stdout, /npx --yes @ponbac\/token-ledger@latest sync --config /);
     assert.ok(plan.stdout.includes(configuration));
+    assert.ok(plan.stdout.includes(`XDG_CONFIG_HOME=${join(directory, "config")}`));
     assert.match(plan.stdout, /07:05|<integer>7<\/integer>/);
 
     const refused = run(["schedule", "install", "--config", configuration]);
@@ -383,7 +388,7 @@ await test("login saves what a scheduled sync needs, and schedule install change
     assert.equal(login.status, 0, login.stderr);
     assert.deepEqual(readdirSync(join(directory, "config")), ["token-ledger"]);
     assert.deepEqual(
-      JSON.parse(readFileSync(join(directory, "config/token-ledger/sync.json"), "utf8")),
+      decodeSettings(readFileSync(join(directory, "config/token-ledger/sync.json"), "utf8")),
       { server: "https://toki.example.com/", token },
     );
 

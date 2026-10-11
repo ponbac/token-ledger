@@ -35,6 +35,7 @@ import { csv, syncSummary, table } from "./format.ts";
 import { TimeOfDay, describe, hostScheduler, perform } from "./schedule.ts";
 import {
   ServerUrl,
+  configHome,
   loadMachine,
   loadSyncSettings,
   saveSyncSettings,
@@ -487,7 +488,7 @@ const login = Command.make(
   }),
 ).pipe(
   Command.withDescription(
-    "Save the toki2 server and API token for sync and scheduled syncs, readable only by you",
+    "Save the toki2 server and API token in sync.json for sync and scheduled syncs",
   ),
 );
 
@@ -532,6 +533,7 @@ const scheduleInstall = Command.make(
     const actions = yield* scheduler.install({
       at: flags.at,
       nodeDirectory: path.dirname(process.execPath),
+      configHome: yield* configHome,
       flags: [
         ...Option.match(config, { onNone: () => [], onSome: (file) => ["--config", file] }),
         ...Option.match(flags.timeZone, {
