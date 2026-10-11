@@ -34,7 +34,8 @@ export interface ScheduledSync {
  * How a command's result is treated. A `required` command must exit 0. A `reported` command
  * shows its output and any exit code is accepted. A `silent` command is attempted with its
  * output and outcome discarded. An `absent` command asks whether the job still exists: its
- * output is discarded, and exit 0 is the failure.
+ * output is discarded, and it must exit with one of `gone`, or with any non-zero code when
+ * `gone` is empty.
  */
 type Outcome = "required" | "reported" | "silent" | "absent";
 
@@ -48,6 +49,8 @@ export type Action = Data.TaggedEnum<{
     readonly shown: string;
     readonly outcome: Outcome;
     readonly hint: string;
+    /** Exit codes by which an `absent` command confirms the job is gone. */
+    readonly gone: ReadonlyArray<number>;
   };
 }>;
 
@@ -73,7 +76,14 @@ const task = "token-ledger sync";
 const packageSpec = "@ponbac/token-ledger@latest";
 
 function run(outcome: Outcome, program: string, args: ReadonlyArray<string>, hint = "") {
-  return Action.Run({ program, args, shown: [program, ...args].join(" "), outcome, hint });
+  return Action.Run({
+    program,
+    args,
+    shown: [program, ...args].join(" "),
+    outcome,
+    hint,
+    gone: [],
+  });
 }
 
 /** Rejects job values that a scheduler's quoting cannot carry. */
@@ -183,11 +193,15 @@ WantedBy=timers.target
       Action.Remove({ file: service }),
       Action.Remove({ file: timer }),
       systemctl("reported", ["daemon-reload"]),
-      systemctl(
-        "absent",
-        ["is-active", "--quiet", `${unit}.timer`],
-        "The timer is still active; systemd's reason is shown above.",
-      ),
+      // is-active exits 3 for an inactive unit and 4 for an unknown one; 1 is a failed query.
+      Action.Run({
+        ...systemctl(
+          "absent",
+          ["is-active", "--quiet", `${unit}.timer`],
+          "Cannot confirm that the timer is gone; systemd's reason is shown above.",
+        ),
+        gone: [3, 4],
+      }),
     ],
     status: [systemctl("reported", ["status", "--no-pager", `${unit}.timer`, `${unit}.service`])],
   };
@@ -308,6 +322,7 @@ export const taskScheduler: Scheduler = {
             shown: `powershell.exe ${options.join(" ")} <the script below, as UTF-16LE Base64>\n${script}`,
             outcome: "required",
             hint: "",
+            gone: [],
           }),
         ];
       }),
@@ -361,7 +376,7 @@ export const describe = (actions: ReadonlyArray<Action>) =>
  * Carries out actions in order, creating parent directories for written files. Stops with a
  * `ScheduleError` at the first file that cannot be changed, `required` or `reported` command
  * that cannot be started, `required` command that exits non-zero, or `absent` command that
- * exits 0.
+ * does not confirm the job is gone.
  */
 export const perform = Effect.fn("Schedule.perform")(function* (actions: ReadonlyArray<Action>) {
   const fs = yield* FileSystem.FileSystem;
@@ -379,7 +394,7 @@ export const perform = Effect.fn("Schedule.perform")(function* (actions: Readonl
         fs
           .remove(file, { force: true })
           .pipe(Effect.mapError(() => new ScheduleError({ message: `Cannot remove ${file}.` }))),
-      Run: ({ program, args, outcome, hint }) => {
+      Run: ({ program, args, outcome, hint, gone }) => {
         const output = outcome === "silent" || outcome === "absent" ? "ignore" : "inherit";
 
         const exit = spawner
@@ -409,9 +424,10 @@ export const perform = Effect.fn("Schedule.perform")(function* (actions: Readonl
           // A scheduler that cannot be started holds no job.
           Match.when("absent", () =>
             exit.pipe(
-              Effect.orElseSucceed(() => 1),
+              Effect.map((code) => (gone.length === 0 ? code !== 0 : gone.includes(code))),
+              Effect.orElseSucceed(() => true),
               Effect.filterOrFail(
-                (code) => code !== 0,
+                (confirmed) => confirmed,
                 () => new ScheduleError({ message: hint }),
               ),
             ),

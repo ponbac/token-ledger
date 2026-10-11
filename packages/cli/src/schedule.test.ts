@@ -123,7 +123,8 @@ suite("systemd user timer", () => {
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, scheduler(() => 0).spawner),
       );
 
-      const { lines, spawner } = scheduler(() => 1);
+      // systemd knows no such unit: disabling fails, and is-active answers 4.
+      const { lines, spawner } = scheduler((line) => (line.includes("is-active") ? 4 : 1));
 
       yield* perform(timer.uninstall).pipe(
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
@@ -139,20 +140,26 @@ suite("systemd user timer", () => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
-  it.effect("fails an uninstall that leaves the timer running", () =>
+  it.effect("fails an uninstall that cannot confirm the timer is gone", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const directory = yield* fs.makeTempDirectoryScoped();
 
-      // systemd refuses to stop the timer, which therefore still reports itself active.
-      const { spawner } = scheduler((line) => (line.includes("is-active") ? 0 : 1));
+      // The timer is still active (0), or the user bus cannot be reached (1).
+      for (const answer of [0, 1]) {
+        const { spawner } = scheduler((line) => (line.includes("is-active") ? answer : 1));
 
-      const outcome = yield* perform(systemdTimer(directory).uninstall).pipe(
-        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
-        Effect.result,
-      );
+        const outcome = yield* perform(systemdTimer(directory).uninstall).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+          Effect.result,
+        );
 
-      assert.match(Result.isFailure(outcome) ? outcome.failure.message : "", /still active/);
+        assert.match(
+          Result.isFailure(outcome) ? outcome.failure.message : "",
+          /Cannot confirm/,
+          `is-active exit ${answer}`,
+        );
+      }
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 });
