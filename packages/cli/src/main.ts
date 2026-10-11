@@ -26,13 +26,20 @@ import {
   Result,
   Schema,
 } from "effect";
-import { Command, Flag } from "effect/cli";
+import { Command, Flag, Prompt } from "effect/cli";
 import { FetchHttpClient } from "effect/http";
 
 import metadata from "../package.json" with { type: "json" };
 
 import { csv, syncSummary, table } from "./format.ts";
-import { ServerUrl, loadMachine, loadSyncSettings, settingsDirectory } from "./settings.ts";
+import { TimeOfDay, describe, hostScheduler, perform } from "./schedule.ts";
+import {
+  ServerUrl,
+  loadMachine,
+  loadSyncSettings,
+  saveSyncSettings,
+  settingsDirectory,
+} from "./settings.ts";
 import { upload } from "./upload.ts";
 
 class CliError extends Schema.TaggedError<CliError>()("CliError", { message: Schema.String }) {}
@@ -52,6 +59,10 @@ const systemTimeZone = Effect.sync(() => Intl.DateTimeFormat().resolvedOptions()
       }),
   ),
 );
+
+/** Resolves a path as typed in a shell: `~/` is the home directory, and the rest is relative to `base`. */
+const expandPath = (path: Path.Path, value: string, base = workingDirectory) =>
+  path.resolve(base, value.startsWith("~/") ? path.join(home, value.slice(2)) : value);
 
 /** Flags selecting usage, shared by `report` and `sync`. */
 function usageFlags(sinceDefault: string, strict: string) {
@@ -117,8 +128,7 @@ const usageRequest = Effect.fn("CLI.usageRequest")(function* (
 
   const today = DateTime.formatIsoDate(DateTime.setZone(yield* DateTime.now, timeZone));
 
-  const expand = (value: string, base = workingDirectory) =>
-    path.resolve(base, value.startsWith("~/") ? path.join(home, value.slice(2)) : value);
+  const expand = (value: string, base?: string) => expandPath(path, value, base);
 
   const configFile = expand(Option.getOrElse(flags.config, () => "token-ledger.json"));
   let configuration: Configuration = {};
@@ -297,6 +307,17 @@ const report = Command.make(
   Command.withDescription("Report local token consumption and API-equivalent cost by project"),
 );
 
+const serverFlag = Flag.String("server").pipe(
+  Flag.withSchema(ServerUrl),
+  Flag.withFallbackConfig(Config.schema(ServerUrl, "TOKEN_LEDGER_SERVER")),
+  Flag.optional,
+);
+
+const tokenFlag = Flag.Redacted("token").pipe(
+  Flag.withFallbackConfig(Config.Redacted("TOKI_API_TOKEN")),
+  Flag.optional,
+);
+
 // Claude Code deletes transcripts after `cleanupPeriodDays`, 30 by default.
 const claudeRetentionDays = 30;
 
@@ -307,15 +328,10 @@ const sync = Command.make(
       "13 days before --until",
       "Exit 2 without uploading for missing/partial sources or unpriced usage",
     ),
-    server: Flag.String("server").pipe(
-      Flag.withSchema(ServerUrl),
-      Flag.withFallbackConfig(Config.schema(ServerUrl, "TOKEN_LEDGER_SERVER")),
-      Flag.optional,
+    server: serverFlag.pipe(
       Flag.withDescription("toki2 URL; otherwise TOKEN_LEDGER_SERVER or sync.json"),
     ),
-    token: Flag.Redacted("token").pipe(
-      Flag.withFallbackConfig(Config.Redacted("TOKI_API_TOKEN")),
-      Flag.optional,
+    token: tokenFlag.pipe(
       Flag.withDescription("toki2 API token; prefer TOKI_API_TOKEN or sync.json"),
     ),
     dryRun: Flag.Boolean("dry-run").pipe(
@@ -410,6 +426,172 @@ const sync = Command.make(
   ),
 );
 
+const interactive = <A>(prompt: Prompt.Prompt<A>) =>
+  Prompt.run(prompt).pipe(
+    Effect.mapError(
+      () =>
+        new CliError({
+          message: "Nothing was saved. Without a terminal, pass --server and set TOKI_API_TOKEN.",
+        }),
+    ),
+  );
+
+const login = Command.make(
+  "login",
+  {
+    server: serverFlag.pipe(
+      Flag.withDescription("toki2 URL; otherwise TOKEN_LEDGER_SERVER or a prompt"),
+    ),
+    token: tokenFlag.pipe(
+      Flag.withDescription("toki2 API token; prefer the prompt or TOKI_API_TOKEN"),
+    ),
+  },
+  Effect.fn("CLI.login")(function* (flags) {
+    const directory = yield* settingsDirectory;
+
+    // An unreadable sync.json is what login replaces, so it only loses the suggested server.
+    const suggestion = yield* loadSyncSettings(directory).pipe(
+      Effect.map((saved) => saved.server?.href ?? ""),
+      Effect.orElseSucceed(() => ""),
+    );
+
+    const server = Option.isSome(flags.server)
+      ? flags.server.value
+      : yield* interactive(
+          Prompt.String({
+            message: "toki2 server URL",
+            default: suggestion,
+            validate: (value) =>
+              Schema.decodeUnknownEffect(ServerUrl)(value).pipe(
+                Effect.as(value),
+                Effect.mapError(() => "Enter an https:// URL, or http:// on localhost."),
+              ),
+          }),
+        ).pipe(Effect.flatMap(Schema.decodeUnknownEffect(ServerUrl)), Effect.orDie);
+
+    const token = Option.isSome(flags.token)
+      ? flags.token.value
+      : yield* interactive(
+          Prompt.Password({
+            message: "toki2 API token",
+            validate: (value) =>
+              value.trim() === "" ? Effect.fail("Paste the token.") : Effect.succeed(value.trim()),
+          }),
+        );
+
+    const file = yield* saveSyncSettings(directory, server, token);
+
+    yield* Console.log(
+      `Saved the server and API token to ${file}.\nNext: token-ledger sync --dry-run, then token-ledger schedule install.`,
+    );
+  }),
+).pipe(
+  Command.withDescription(
+    "Save the toki2 server and API token for sync and scheduled syncs, readable only by you",
+  ),
+);
+
+const scheduleInstall = Command.make(
+  "install",
+  {
+    at: Flag.String("at").pipe(
+      Flag.withDefault("12:30"),
+      Flag.withSchema(TimeOfDay),
+      Flag.withDescription("Daily local time as HH:MM; defaults to 12:30"),
+    ),
+    config: Flag.String("config").pipe(
+      Flag.optional,
+      Flag.withDescription("JSON config for the scheduled sync; ./token-ledger.json is not read"),
+    ),
+    timeZone: Flag.String("time-zone").pipe(
+      Flag.withSchema(Schema.TimeZoneNamedFromString),
+      Flag.optional,
+      Flag.withDescription("IANA time zone for the scheduled sync; defaults to the system zone"),
+    ),
+    provider: Flag.Literals("provider", ["all", "codex", "claude", "grok", "copilot"]).pipe(
+      Flag.withDefault("all"),
+    ),
+    dryRun: Flag.Boolean("dry-run").pipe(
+      Flag.withDefault(false),
+      Flag.withDescription("Print the files and commands; change nothing"),
+    ),
+  },
+  Effect.fn("CLI.scheduleInstall")(function* (flags) {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const scheduler = yield* hostScheduler;
+    const config = Option.map(flags.config, (value) => expandPath(path, value));
+
+    // The job runs elsewhere and later; a config that is missing now would fail every day.
+    if (
+      Option.isSome(config) &&
+      !(yield* fs.exists(config.value).pipe(Effect.orElseSucceed(() => false)))
+    )
+      return yield* new CliError({ message: `Cannot find the configuration ${config.value}.` });
+
+    const actions = yield* scheduler.install({
+      at: flags.at,
+      nodeDirectory: path.dirname(process.execPath),
+      flags: [
+        ...Option.match(config, { onNone: () => [], onSome: (file) => ["--config", file] }),
+        ...Option.match(flags.timeZone, {
+          onNone: () => [],
+          onSome: (zone) => ["--time-zone", zone.id],
+        }),
+        ...(flags.provider === "all" ? [] : ["--provider", flags.provider]),
+      ],
+    });
+
+    if (flags.dryRun) return yield* Console.log(describe(actions));
+
+    const directory = yield* settingsDirectory;
+    const settings = yield* loadSyncSettings(directory);
+
+    if (settings.server === undefined || settings.token === undefined)
+      return yield* new CliError({
+        message:
+          "No saved server and API token. Run token-ledger login first: a scheduled sync cannot read --token or your shell's environment.",
+      });
+
+    yield* perform(actions);
+
+    yield* Console.log(
+      `Scheduled a daily sync at ${flags.at} as a ${scheduler.name}. Inspect it with token-ledger schedule status.`,
+    );
+  }),
+).pipe(
+  Command.withDescription(
+    "Install or replace the daily sync; it needs the server and token saved by login",
+  ),
+);
+
+const scheduleStatus = Command.make(
+  "status",
+  {},
+  Effect.fn("CLI.scheduleStatus")(function* () {
+    const scheduler = yield* hostScheduler;
+
+    yield* perform(scheduler.status);
+  }),
+).pipe(Command.withDescription("Show the scheduler's own report of the daily sync"));
+
+const scheduleUninstall = Command.make(
+  "uninstall",
+  {},
+  Effect.fn("CLI.scheduleUninstall")(function* () {
+    const scheduler = yield* hostScheduler;
+
+    yield* perform(scheduler.uninstall);
+
+    yield* Console.log(`Removed the ${scheduler.name}. Saved settings were kept.`);
+  }),
+).pipe(Command.withDescription("Remove the daily sync; saved settings stay"));
+
+const schedule = Command.make("schedule").pipe(
+  Command.withDescription("Run sync daily with systemd, launchd, or Task Scheduler"),
+  Command.withSubcommands([scheduleInstall, scheduleStatus, scheduleUninstall]),
+);
+
 const example = Command.make("config-example", {}, () =>
   Console.log(
     JSON.stringify(
@@ -433,7 +615,7 @@ Command.make("token-ledger").pipe(
   Command.withDescription(
     "Local token accounting across coding agents. API estimates, not subscription bills.",
   ),
-  Command.withSubcommands([report, sync, example]),
+  Command.withSubcommands([report, sync, login, schedule, example]),
   Command.run({ version: metadata.version }),
   Effect.provide(Ledger.layer),
   Effect.provide(NodeServices.layer),

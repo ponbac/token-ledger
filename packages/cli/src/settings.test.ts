@@ -1,8 +1,18 @@
 import { NodeServices } from "@effect/platform-node";
 import { assert, it } from "@effect/vitest";
-import { Deferred, Effect, Fiber, FileSystem, Path, Result, Schema } from "effect";
+import {
+  Deferred,
+  Effect,
+  Fiber,
+  FileSystem,
+  Option,
+  Path,
+  Redacted,
+  Result,
+  Schema,
+} from "effect";
 
-import { ServerUrl, loadMachine } from "./settings.ts";
+import { ServerUrl, loadMachine, loadSyncSettings, saveSyncSettings } from "./settings.ts";
 
 it.effect("keeps one machine identity, honors edited labels, and never replaces a bad file", () =>
   Effect.gen(function* () {
@@ -56,6 +66,35 @@ it.effect("concurrent first runs publish complete identities and adopt the winne
     assert.isTrue(Result.isSuccess(second));
     assert.deepStrictEqual(original, second);
     assert.deepStrictEqual(yield* fs.readDirectory(directory), ["machine.json"]);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("saves the server and token privately, replacing what was there", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const directory = path.join(yield* fs.makeTempDirectoryScoped(), "token-ledger");
+
+    yield* fs.makeDirectory(directory);
+    yield* fs.writeFileString(path.join(directory, "sync.json"), "{", { mode: 0o644 });
+
+    const file = yield* saveSyncSettings(
+      directory,
+      new URL("https://toki.example/api"),
+      Redacted.make("toki_fixture"),
+    );
+
+    const saved = yield* loadSyncSettings(directory);
+
+    assert.strictEqual(saved.server?.href, "https://toki.example/api");
+    assert.deepStrictEqual(
+      Option.map(Option.fromUndefinedOr(saved.token), Redacted.value),
+      Option.some("toki_fixture"),
+    );
+    assert.deepStrictEqual(yield* fs.readDirectory(directory), ["sync.json"]);
+
+    if (process.platform !== "win32")
+      assert.strictEqual((yield* fs.stat(file)).mode & 0o777, 0o600);
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 

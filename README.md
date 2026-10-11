@@ -354,8 +354,14 @@ Run it on **every machine** where you use a coding agent, and schedule it daily.
 1. **Create an API token.** In toki2, open **Account** in the side navigation, then
    **API tokens**, and create a token such as `token-ledger work-laptop`. The secret is
    shown only once. A token per machine lets you revoke one machine alone.
-2. **Save the server and token** in `sync.json` in your settings directory, and make
-   the file readable only by you:
+2. **Save the server and token:**
+
+   ```sh
+   npx @ponbac/token-ledger@latest login
+   ```
+
+   `login` asks for the server URL and the token, then writes them to `sync.json` in
+   your settings directory, readable only by you:
 
    | Platform | Settings directory                                            |
    | -------- | ------------------------------------------------------------- |
@@ -363,17 +369,10 @@ Run it on **every machine** where you use a coding agent, and schedule it daily.
    | macOS    | `~/Library/Application Support/token-ledger`                  |
    | Windows  | `%APPDATA%\token-ledger`                                      |
 
-   ```json
-   { "server": "https://toki.example.com", "token": "toki_…" }
-   ```
-
-   ```sh
-   chmod 600 ~/.config/token-ledger/sync.json
-   ```
-
-   A set `XDG_CONFIG_HOME` takes precedence on every platform. Alternatively set
-   `TOKEN_LEDGER_SERVER` and `TOKI_API_TOKEN`, or pass `--server`
-   and `--token`; flags win over environment variables, which win over `sync.json`.
+   A set `XDG_CONFIG_HOME` takes precedence on every platform. Without a terminal,
+   pass `--server` and set `TOKI_API_TOKEN`; `login` saves those. `sync` also accepts
+   `TOKEN_LEDGER_SERVER` and `TOKI_API_TOKEN`, or `--server` and `--token`, without
+   saving them; flags win over environment variables, which win over `sync.json`.
    The token is sent only over HTTPS, or plain HTTP to localhost, and never printed.
 
 3. **Check, then sync:**
@@ -393,8 +392,49 @@ do not run in your project directory. Days follow the system time zone; add
 
 ### Schedule a daily sync
 
-Schedule a daily sync to upload history before providers prune it. Missed-run
-behavior depends on the scheduler, as described below. If `npx` is not on the
+Schedule a daily sync to upload history before providers prune it:
+
+```sh
+npx @ponbac/token-ledger@latest schedule install
+```
+
+This registers a daily job with the operating system's own scheduler; token-ledger
+does not keep a process running. Run it again to change the job.
+
+| Flag                    | Effect                                                  |
+| ----------------------- | ------------------------------------------------------- |
+| `--at 07:30`            | Daily local time; the default is `12:30`                |
+| `--config <file>`       | Project mappings for the job, saved as an absolute path |
+| `--time-zone <zone>`    | Pass a time zone when the scheduler may not have one    |
+| `--provider <provider>` | Sync one provider only                                  |
+| `--dry-run`             | Print the files and commands, and change nothing        |
+
+`schedule status` shows the scheduler's own report, including the last run, and
+`schedule uninstall` removes the job and keeps your settings. A run's output is in
+`journalctl --user -u token-ledger-sync` on Linux and in
+`~/Library/Logs/token-ledger-sync.log` on macOS.
+
+| Platform | Scheduler           | A missed run                                           |
+| -------- | ------------------- | ------------------------------------------------------ |
+| Linux    | systemd user timer  | Runs within ten minutes of your next login             |
+| macOS    | launchd agent       | Runs on wake; also syncs each time you log in          |
+| Windows  | Task Scheduler task | Runs at the next opportunity, on battery power as well |
+
+The job needs the server and token saved by `login`: it cannot read `--token` or
+variables set only in your shell, such as `TOKI_API_TOKEN` or `CLAUDE_CONFIG_DIR`.
+It runs `npx --yes @ponbac/token-ledger@latest sync`, so it stays up to date. It
+looks for `npx` beside the Node that ran `schedule install` and then on the
+scheduler's `PATH`, so it survives removing that Node version when another is on the
+`PATH`.
+
+Linux needs a systemd user session, which Arch, Ubuntu, Debian, and Fedora provide.
+Without one, as on Alpine or in WSL with systemd disabled, use the cron entry below.
+
+<details>
+<summary>Scheduling by hand</summary>
+
+`schedule install --dry-run` prints the exact files and commands for your machine.
+The examples below do the same with a login shell finding `npx`; if it is not on the
 scheduler's `PATH`, use its absolute path or install the CLI globally with
 `npm install -g @ponbac/token-ledger` and run `token-ledger sync`.
 
@@ -487,6 +527,8 @@ Register-ScheduledTask -TaskName "token-ledger sync" -Action $action -Trigger $t
 `-StartWhenAvailable` runs a missed sync at the next opportunity. The battery
 switches allow starts on battery and keep a running sync from being stopped when
 AC power disconnects. See [Task Scheduler settings](https://learn.microsoft.com/en-us/powershell/module/scheduledtasks/new-scheduledtasksettingsset).
+
+</details>
 
 ### What leaves the machine
 

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { homedir, hostname } from "node:os";
 
 import { SyncMachine } from "@token-ledger/core/sync";
-import { Config, Effect, FileSystem, Match, Option, Path, Schema } from "effect";
+import { Config, Effect, FileSystem, Match, Option, Path, type Redacted, Schema } from "effect";
 
 /** Per-user settings could not be read, decoded, or saved; never contains the token. */
 export class SettingsError extends Schema.TaggedError<SettingsError>()("SettingsError", {
@@ -116,4 +116,39 @@ export const loadSyncSettings = Effect.fn("Settings.loadSync")(function* (direct
     Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(SyncSettings))),
     Effect.mapError(() => failure),
   );
+});
+
+/**
+ * Replaces `sync.json` with the server and token, readable only by this user. The file is
+ * complete before it takes the name, so a concurrent sync never reads half of it. Errors
+ * never contain the token.
+ */
+export const saveSyncSettings = Effect.fn("Settings.saveSync")(function* (
+  directory: string,
+  server: URL,
+  token: Redacted.Redacted<string>,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const file = path.join(directory, "sync.json");
+
+  yield* Effect.gen(function* () {
+    const settings = yield* Schema.encodeEffect(SyncSettings)({ server, token });
+
+    yield* fs.makeDirectory(directory, { recursive: true });
+
+    const temporaryDirectory = yield* fs.makeTempDirectoryScoped({ directory, prefix: ".sync-" });
+    const temporary = path.join(temporaryDirectory, "sync.json");
+
+    yield* fs.writeFileString(temporary, `${JSON.stringify(settings, null, 2)}\n`, {
+      flag: "wx",
+      mode: 0o600,
+    });
+    yield* fs.rename(temporary, file);
+  }).pipe(
+    Effect.scoped,
+    Effect.mapError(() => new SettingsError({ message: `Cannot save ${file}.` })),
+  );
+
+  return file;
 });
