@@ -17,20 +17,28 @@ import {
   type Coverage,
   ReportRequest,
   UsageReport,
-  addTokens,
   totalTokens,
-  zeroTokens,
   type ReportRow,
   type Source,
+  type UsageRecord,
 } from "./model.ts";
-import { lookupPrice, priceTokens } from "./pricing.ts";
-import { projectResolver } from "./projects.ts";
+import { addUsage, lookupPrice, priceTokens } from "./pricing.ts";
+import { type Attribution, projectResolver } from "./projects.ts";
 import { claudeParser } from "./providers/claude.ts";
 import { codexParser } from "./providers/codex.ts";
 import { copilotDatabaseLines, type CopilotDatabaseError } from "./providers/copilot-db.ts";
 import { copilotParser } from "./providers/copilot.ts";
 import { grokParser } from "./providers/grok.ts";
 import type { ParseResult } from "./providers/shared.ts";
+import {
+  SyncClient,
+  SyncPayload,
+  hourRange,
+  providerCoverage,
+  replacedProviders,
+  sessionBuckets,
+  unattributed,
+} from "./sync.ts";
 
 /** Invalid report windows or paths, with no provider payloads in the error. */
 export class InvalidRequest extends Schema.TaggedError<InvalidRequest>()("InvalidRequest", {
@@ -42,16 +50,21 @@ export class Ledger extends Context.Service<
   Ledger,
   {
     readonly report: (request: ReportRequest) => Effect.Effect<UsageReport, InvalidRequest>;
+    /** Hourly session buckets for upload; local paths and raw session IDs never enter the payload. */
+    readonly syncPayload: (
+      request: ReportRequest,
+      client: SyncClient,
+    ) => Effect.Effect<SyncPayload, InvalidRequest>;
   }
 >()("token-ledger/Ledger") {
-  /** Filesystem implementation. All mutable aggregation and deduplication state belongs to a single report. */
+  /** Filesystem implementation. All mutable aggregation and deduplication state belongs to a single call. */
   static readonly layer = Layer.effect(
     Ledger,
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
 
-      const report = Effect.fn("Ledger.report")(function* (input: ReportRequest) {
+      const decode = Effect.fn("Ledger.decode")(function* (input: ReportRequest) {
         const request = yield* Schema.decodeUnknownEffect(ReportRequest)(input).pipe(
           Effect.mapError(
             () =>
@@ -73,16 +86,26 @@ export class Ledger extends Context.Service<
           });
         }
 
+        return request;
+      });
+
+      /**
+       * Streams each deduplicated, non-empty record that `locate` places, with its project.
+       * Records outside the window are neither deduplicated nor attributed.
+       */
+      const scan = Effect.fn("Ledger.scan")(function* <Slot>(
+        request: ReportRequest,
+        locate: (timestamp: number) => Slot | undefined,
+        collect: (record: UsageRecord, attribution: Attribution, slot: Slot) => void,
+      ) {
         const resolveProject = yield* projectResolver(request.projects).pipe(
           Effect.provideService(FileSystem.FileSystem, fs),
           Effect.provideService(Path.Path, path),
         );
 
-        const rows = new Map<string, ReportRow>();
         const seen = new Set<string>();
         const visitedFiles = new Set<string>();
         const coverage: Coverage[] = [];
-        const window = dayWindow(request.since, request.until, request.timeZone);
 
         for (const source of request.sources) {
           let files = 0;
@@ -102,9 +125,9 @@ export class Ledger extends Context.Service<
             for (const warning of result.warnings) warnings.add(warning);
 
             for (const record of result.records) {
-              const day = window.dayOf(record.timestamp);
+              const slot = locate(record.timestamp);
 
-              if (day === undefined || totalTokens(record.tokens) === 0) continue;
+              if (slot === undefined || totalTokens(record.tokens) === 0) continue;
               const id = `${record.provider}:${record.id}`;
 
               if (seen.has(id)) {
@@ -113,28 +136,7 @@ export class Ledger extends Context.Service<
               }
 
               seen.add(id);
-              const project = yield* resolveProject(record, source.project);
-              const key = JSON.stringify([project, day, record.provider, record.model]);
-              const previous = rows.get(key);
-
-              const price = lookupPrice(request.pricing, record.model);
-              const cost = priceTokens(record.tokens, price);
-
-              const unpricedRecords = (previous?.unpricedRecords ?? 0) + (cost === null ? 1 : 0);
-
-              const pricedCostUsd = (previous?.pricedCostUsd ?? 0) + (cost ?? 0);
-              rows.set(key, {
-                project,
-                day,
-                provider: record.provider,
-                model: record.model,
-                pricePerMillion: price ?? null,
-                tokens: addTokens(previous?.tokens ?? zeroTokens, record.tokens),
-                records: (previous?.records ?? 0) + 1,
-                estimatedCostUsd: unpricedRecords > 0 ? null : pricedCostUsd,
-                pricedCostUsd,
-                unpricedRecords,
-              });
+              collect(record, yield* resolveProject(record, source.project), slot);
             }
           });
 
@@ -235,12 +237,35 @@ export class Ledger extends Context.Service<
             source: source.path,
             status,
             files,
+            unreadable: missingRoot ? 0 : failedFiles,
             malformedLines,
             skippedRecords,
             duplicates,
             warnings: [...warnings],
           });
         }
+
+        return coverage;
+      });
+
+      const report = Effect.fn("Ledger.report")(function* (input: ReportRequest) {
+        const request = yield* decode(input);
+        const window = dayWindow(request.since, request.until, request.timeZone);
+        const rows = new Map<string, ReportRow>();
+
+        const coverage = yield* scan(request, window.dayOf, (record, { project }, day) => {
+          const key = JSON.stringify([project, day, record.provider, record.model]);
+          const price = lookupPrice(request.pricing, record.model);
+
+          rows.set(key, {
+            project,
+            day,
+            provider: record.provider,
+            model: record.model,
+            pricePerMillion: price ?? null,
+            ...addUsage(rows.get(key), record.tokens, priceTokens(record.tokens, price)),
+          });
+        });
 
         return UsageReport.make({
           version: 2,
@@ -265,7 +290,66 @@ export class Ledger extends Context.Service<
         });
       });
 
-      return Ledger.of({ report });
+      const syncPayload = Effect.fn("Ledger.syncPayload")(function* (
+        input: ReportRequest,
+        clientInput: SyncClient,
+      ) {
+        const request = yield* decode(input);
+
+        const client = yield* Schema.decodeUnknownEffect(SyncClient)(clientInput).pipe(
+          Effect.mapError(
+            () =>
+              new InvalidRequest({
+                message: "Expected a machine UUID and label and a client version.",
+              }),
+          ),
+        );
+
+        // Local midnights are not whole UTC hours in every zone; widen so hours are never split.
+        const window = hourRange(dayWindow(request.since, request.until, request.timeZone));
+        const buckets = sessionBuckets(request.pricing);
+
+        const coverage = yield* scan(
+          request,
+          (timestamp) =>
+            timestamp >= window.start && timestamp < window.end ? timestamp : undefined,
+          (record, attribution) =>
+            buckets.add(record, attribution.shareable ? attribution.project : unattributed),
+        );
+
+        const summary = providerCoverage(coverage);
+        const replaced = replacedProviders(summary);
+
+        return yield* SyncPayload.makeEffect({
+          version: 1,
+          machine: client.machine,
+          clientVersion: client.version,
+          timeZone: request.timeZone.id,
+          window: {
+            start: new Date(window.start).toISOString(),
+            end: new Date(window.end).toISOString(),
+          },
+          currency: "USD",
+          costBasis: "api-equivalent",
+          pricing: {
+            status: request.pricing.status,
+            fetchedAt: request.pricing.fetchedAt,
+            source: request.pricing.source,
+          },
+          // Unread history must not replace stored usage with less; drop those providers.
+          buckets: buckets.finish().filter((bucket) => replaced.has(bucket.provider)),
+          coverage: summary,
+        }).pipe(
+          Effect.mapError(
+            () =>
+              new InvalidRequest({
+                message: "Report data must satisfy the sync payload contract.",
+              }),
+          ),
+        );
+      });
+
+      return Ledger.of({ report, syncPayload });
     }),
   );
 }
