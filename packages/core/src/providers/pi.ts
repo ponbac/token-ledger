@@ -99,24 +99,21 @@ export function piParser(file: string): TranscriptParser {
 
       if (wrapper === null || carrier === null) return type === "message" ? malformed : empty;
       const assistant = type === "message" && carrier.role === "assistant";
-
-      if (type === "message" && !assistant && carrier.role !== "toolResult") return empty;
       // Only assistant messages and `usage` entries name a model, and they always carry usage.
       const attributed = assistant || type === "usage";
+
+      const counted =
+        attributed ||
+        (type === "message" && carrier.role === "toolResult") ||
+        type === "compaction" ||
+        type === "branch_summary";
+
       const usage = carrier.usage;
 
       if (usage === undefined || usage === null) return attributed ? skipped : empty;
 
-      // Usage on a kind of entry this adapter does not know cannot be read as none.
-      if (
-        type !== "message" &&
-        type !== "usage" &&
-        type !== "compaction" &&
-        type !== "branch_summary"
-      ) {
-        return skipped;
-      }
-
+      // Usage on a kind of entry or message this adapter does not know cannot be read as none.
+      if (!counted) return skipped;
       const stamp = Option.getOrNull(decodeStamp(raw));
       const names = Option.getOrNull(decodeNames(wrapper.message));
       const count = Option.getOrNull(decodeCounts(usage));

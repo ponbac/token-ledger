@@ -646,10 +646,11 @@ describe("Ledger reports through the public interface", () => {
         // So is usage on a kind of entry Pi did not have when this was written.
         JSON.stringify({ ...stamp, type: "later_kind", id: "c0000005", usage: piUsage(1, 1) }),
         JSON.stringify({ ...stamp, id: "c0000006", usage: piUsage(1, 1) }),
+        piMessage("c0000007", "11:00:00", "later_role", piUsage(1, 1)),
       ]);
 
       const partial = yield* ledger.report(request([{ provider: "pi", path: invalid }]));
-      assert.deepInclude(partial.coverage[0], { status: "partial", skippedRecords: 6 });
+      assert.deepInclude(partial.coverage[0], { status: "partial", skippedRecords: 7 });
       assert.lengthOf(partial.rows, 0);
     }).pipe(Effect.provide(runtime)),
   );
