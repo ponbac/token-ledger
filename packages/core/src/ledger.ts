@@ -30,6 +30,7 @@ import { codexParser } from "./providers/codex.ts";
 import { copilotDatabaseLines, type CopilotDatabaseError } from "./providers/copilot-db.ts";
 import { copilotParser } from "./providers/copilot.ts";
 import { grokParser } from "./providers/grok.ts";
+import { piParser } from "./providers/pi.ts";
 import type { ParseResult } from "./providers/shared.ts";
 import {
   type ObservedPlan,
@@ -121,7 +122,10 @@ export class Ledger extends Context.Service<
         const visitedFiles = new Set<string>();
         // Counted without being opened; a later source naming one of these files still reads it.
         const settledFiles = new Set<string>();
-        const coverage: Coverage[] = [];
+        // Built once every source is read, when its duplicate count is final.
+        const coverage: Array<() => Coverage> = [];
+        // A fork's copies wait for every source, so whichever file holds the original wins.
+        const inherited: Array<Effect.Effect<void>> = [];
 
         for (const source of request.sources) {
           let files = 0;
@@ -134,6 +138,22 @@ export class Ledger extends Context.Service<
           const warnings = new Set<string>();
 
           const copilot = source.provider === "copilot" ? copilotParser(source.path) : undefined;
+
+          const place = Effect.fn("Ledger.placeRecord")(function* (
+            record: UsageRecord,
+            slot: Slot,
+          ) {
+            const id = `${record.provider}:${record.id}`;
+
+            if (seen.has(id)) {
+              duplicates++;
+
+              return;
+            }
+
+            seen.add(id);
+            collect(record, yield* resolveProject(record, source.project), slot);
+          });
 
           const accept = Effect.fn("Ledger.acceptRecords")(function* (result: ParseResult) {
             malformedLines += result.malformed;
@@ -149,16 +169,14 @@ export class Ledger extends Context.Service<
             for (const record of result.records) {
               const slot = locate(record.timestamp);
 
-              if (slot === undefined || totalTokens(record.tokens) === 0) continue;
-              const id = `${record.provider}:${record.id}`;
+              if (slot !== undefined && totalTokens(record.tokens) > 0) yield* place(record, slot);
+            }
 
-              if (seen.has(id)) {
-                duplicates++;
-                continue;
-              }
+            for (const record of result.inherited) {
+              const slot = locate(record.timestamp);
 
-              seen.add(id);
-              collect(record, yield* resolveProject(record, source.project), slot);
+              if (slot !== undefined && totalTokens(record.tokens) > 0)
+                inherited.push(place(record, slot));
             }
           });
 
@@ -192,6 +210,7 @@ export class Ledger extends Context.Service<
               Match.when("claude", () => claudeParser(canonical)),
               Match.when("grok", () => grokParser(canonical)),
               Match.when("copilot", () => copilot ?? copilotParser(canonical)),
+              Match.when("pi", () => piParser(canonical)),
               Match.exhaustive,
             );
 
@@ -265,7 +284,7 @@ export class Ledger extends Context.Service<
                 ? "partial"
                 : "ok";
 
-          coverage.push({
+          coverage.push(() => ({
             provider: source.provider,
             source: source.path,
             status,
@@ -276,10 +295,12 @@ export class Ledger extends Context.Service<
             skippedRecords,
             duplicates,
             warnings: [...warnings],
-          });
+          }));
         }
 
-        return coverage;
+        for (const copy of inherited) yield* copy;
+
+        return coverage.map((summarize) => summarize());
       });
 
       const report = Effect.fn("Ledger.report")(function* (input: ReportRequest) {

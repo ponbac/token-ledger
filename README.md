@@ -93,15 +93,16 @@ node packages/cli/dist/main.js report
 
 ## Collection coverage
 
-| Provider                   | Default input                                          | Coverage                                                                     |
-| -------------------------- | ------------------------------------------------------ | ---------------------------------------------------------------------------- |
-| Codex                      | `~/.codex/sessions` and `archived_sessions`            | Rollout token events, model switches, session and working-directory metadata |
-| Claude Code                | `~/.claude/projects`                                   | Assistant usage records; repeated message blocks counted once                |
-| Grok Build                 | `~/.grok/sessions/**/updates.jsonl`                    | Saved completed turns and their model breakdowns                             |
-| Copilot CLI / VS Code Chat | `~/.copilot/otel` or `COPILOT_OTEL_FILE_EXPORTER_PATH` | JSONL request spans, VS Code inference events, and SQLite span exports       |
+| Provider                   | Default input                                           | Coverage                                                                        |
+| -------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| Codex                      | `~/.codex/sessions` and `archived_sessions`             | Rollout token events, model switches, session and working-directory metadata    |
+| Claude Code                | `~/.claude/projects`                                    | Assistant usage records; repeated message blocks counted once                   |
+| Grok Build                 | `~/.grok/sessions/**/updates.jsonl`                     | Saved completed turns and their model breakdowns                                |
+| Copilot CLI / VS Code Chat | `~/.copilot/otel` or `COPILOT_OTEL_FILE_EXPORTER_PATH`  | JSONL request spans, VS Code inference events, and SQLite span exports          |
+| Pi                         | `~/.pi/agent/sessions` or `PI_CODING_AGENT_SESSION_DIR` | Assistant messages on every branch, plus usage, compaction, and summary entries |
 
-`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `GROK_HOME`, and `COPILOT_HOME` override the usual
-homes. Configuration supports additional accounts, machines' exported histories,
+`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `GROK_HOME`, `COPILOT_HOME`, and `PI_CODING_AGENT_DIR`
+override the usual homes. Configuration supports additional accounts, machines' exported histories,
 and arbitrary source directories. Histories are opened read-only, including work
 performed outside T3 Code.
 
@@ -577,7 +578,7 @@ refused, `5` unsupported payload version (upgrade token-ledger), `6` payload rej
 - JSONL files are streamed, while Copilot buffers accounting records and span links
   per source for attribution; SQLite imports read the selected accounting rows. Each
   run rescans its sources, and memory grows with observed usage records.
-- Transcripts are append-only, so a Codex, Claude Code, or Grok file last modified more
+- Transcripts are append-only, so a Codex, Claude Code, Grok, or Pi file last modified more
   than 36 hours before the window starts is not opened; coverage counts these as
   `filesBeforeWindow`. This trusts modification times: a history restored with times
   earlier than its last events is missed, so name such a file as the source itself,
@@ -590,6 +591,13 @@ refused, `5` unsupported payload version (upgrade token-ledger), `6` payload rej
   leading burst; it is not lost usage, so coverage stays `ok`. `partial` means real loss:
   malformed lines, usage events that could not be normalized, or, in a report, paths
   that could not be read.
+- Pi `/fork` and `/clone` sessions copy their parent's entries unchanged. Each copied
+  request is counted once, for the session that made it; when that session's file is not
+  among the files read, it is counted for the fork. Pi names no model for nested tool
+  work or for compaction and branch summaries; those tokens are reported under the model
+  `unknown` and stay unpriced. Pi's own recorded costs are not used.
+- A Pi `sessionDir` setting is not read; when sessions live outside the default
+  directory, set `PI_CODING_AGENT_SESSION_DIR` or configure a `pi` source.
 - A truncated or malformed JSONL line is skipped and counted. No prompts are printed
   in diagnostics. An active session can change during a scan; this is not a transactional snapshot.
 - Coverage diagnostics describe every opened file, including its events outside the
