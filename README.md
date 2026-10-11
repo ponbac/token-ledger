@@ -555,7 +555,9 @@ See [the payload contract](docs/sync-v1.md) for every field.
 
 The default window is the last 14 local days. For each provider whose history was
 fully read, the server replaces what this machine previously sent for that provider
-in the window, so repeated syncs never double count, and machines add up. A provider
+in the window, so repeated syncs never double count, and machines add up. Fully read
+means every file that could hold usage in the window: older transcripts are
+[counted without being opened](#accuracy-and-limitations). A provider
 with no history found, or with history that could not be read, keeps its stored data,
 as do providers left out with `--provider`: missing data is never treated as zero.
 
@@ -575,14 +577,23 @@ refused, `5` unsupported payload version (upgrade token-ledger), `6` payload rej
 - JSONL files are streamed, while Copilot buffers accounting records and span links
   per source for attribution; SQLite imports read the selected accounting rows. Each
   run rescans its sources, and memory grows with observed usage records.
+- Transcripts are append-only, so a Codex, Claude Code, or Grok file last modified more
+  than 36 hours before the window starts is not opened; coverage counts these as
+  `filesBeforeWindow`. This trusts modification times: a history restored with times
+  earlier than its last events is missed, so name such a file as the source itself,
+  which is always read. Copilot exports are always read too, because requests are
+  correlated across files and a live SQLite database's modification time lags its rows.
 - Copied files, overlapping source paths, and stable provider record IDs are deduplicated.
   Missing stable IDs are called out where the provider cannot support that guarantee.
-- Codex fork histories use T3 Code's timing heuristic to exclude the leading copied
-  burst. The report explicitly marks affected coverage as partial.
+- Codex fork and subagent histories begin with a copy of their parent's history, which
+  the parent's own rollout already counts. T3 Code's timing heuristic excludes that
+  leading burst; it is not lost usage, so coverage stays `ok`. `partial` means real loss:
+  malformed lines, usage events that could not be normalized, or, in a report, paths
+  that could not be read.
 - A truncated or malformed JSONL line is skipped and counted. No prompts are printed
   in diagnostics. An active session can change during a scan; this is not a transactional snapshot.
-- Coverage diagnostics describe all scanned files, including events outside the selected
-  date window. Codex updates with no usage payload are ignored, not counted as lost usage.
+- Coverage diagnostics describe every opened file, including its events outside the
+  selected date window. Codex updates with no usage payload are ignored, not counted as lost usage.
 - Default project inference uses the current local Git metadata when the transcript
   lacks a remote. Explicit mappings make attribution more stable across machines.
 - A session that works across projects still needs an explicit allocation policy;

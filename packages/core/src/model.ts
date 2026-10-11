@@ -121,12 +121,17 @@ export const ReportRequest = Schema.Struct({
 /** Public request shared by the CLI and later UI. */
 export interface ReportRequest extends Schema.Schema.Type<typeof ReportRequest> {}
 
-/** A bounded coverage summary per source, including skipped data. */
+/**
+ * A bounded coverage summary per source, including skipped data. `files` and the diagnostic
+ * counts describe the files opened; `filesBeforeWindow` counts those left unopened because they
+ * were last modified too long before the window to hold usage in it.
+ */
 export const Coverage = Schema.Struct({
   provider: Provider,
   source: Schema.String,
   status: Schema.Literals(["ok", "missing", "partial", "failed"]),
   files: Schema.Natural,
+  filesBeforeWindow: Schema.Natural,
   unreadable: Schema.Natural,
   malformedLines: Schema.Natural,
   skippedRecords: Schema.Natural,

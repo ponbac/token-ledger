@@ -50,6 +50,7 @@ A synthetic example:
       "provider": "claude",
       "status": "ok",
       "files": 31,
+      "filesBeforeWindow": 412,
       "unreadable": 0,
       "malformedLines": 0,
       "skippedRecords": 0,
@@ -109,15 +110,22 @@ exceeds `records`, and `estimatedCostUsd` is `null` exactly when `unpricedRecord
 
 ## Coverage status
 
-| `status`  | Meaning                                                                   | Server      |
-| --------- | ------------------------------------------------------------------------- | ----------- |
-| `ok`      | Every existing history file was read.                                     | Replace     |
-| `partial` | Every file was read, but some lines or records were unusable or excluded. | Replace     |
-| `failed`  | Some existing history could not be read (`unreadable` > 0).               | Keep stored |
-| `missing` | No history was found for the provider.                                    | Keep stored |
+| `status`  | Meaning                                                                  | Server      |
+| --------- | ------------------------------------------------------------------------ | ----------- |
+| `ok`      | Every history file that could hold usage in `window` was read.           | Replace     |
+| `partial` | Every such file was read, but some lines or usage records were unusable. | Replace     |
+| `failed`  | Some existing history could not be read (`unreadable` > 0).              | Keep stored |
+| `missing` | No history was found for the provider.                                   | Keep stored |
 
 A provider absent from `coverage` was not scanned, for example because of
 `--provider`, and also keeps its stored data. Missing data is never treated as zero.
+
+Transcripts are append-only, so the client does not open a Codex, Claude Code, or Grok
+file last modified more than 36 hours before `window.start`. `files` and the diagnostic
+counts describe the files opened, and `filesBeforeWindow` counts the rest. A provider
+whose history all predates the window is therefore `ok` with `files` 0, and its stored
+buckets in the window are replaced with none. Copilot exports are always opened.
+`filesBeforeWindow` is optional: the first version 1 clients omit it, and a server may ignore it.
 
 ## Server semantics
 

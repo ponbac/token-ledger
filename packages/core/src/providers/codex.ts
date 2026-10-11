@@ -64,7 +64,8 @@ export function codexParser(file: string): TranscriptParser {
   let cwd: string | null = null;
   let repository: UsageRecord["repository"] = null;
   let sawMeta = false;
-  let copyAnchor: number | null = null;
+  // A fork's leading copied burst: the instants of its latest copied usage and latest copied event.
+  let burst: { readonly usage: number; readonly last: number } | null = null;
   let lastSignature: string | null = null;
 
   return {
@@ -87,11 +88,14 @@ export function codexParser(file: string): TranscriptParser {
         const remote = meta.git?.repository_url;
         repository = remote === undefined ? null : RepositoryReference.Remote({ value: remote });
 
+        const forked = timestamp(event.timestamp);
+
         if (
-          meta.forked_from_id !== undefined ||
-          Option.getOrNull(Schema.decodeUnknownOption(Spawn)(meta.source)) !== null
+          forked !== null &&
+          (meta.forked_from_id !== undefined ||
+            Option.getOrNull(Schema.decodeUnknownOption(Spawn)(meta.source)) !== null)
         ) {
-          copyAnchor = timestamp(event.timestamp);
+          burst = { usage: forked, last: forked };
         }
 
         return empty;
@@ -116,10 +120,24 @@ export function codexParser(file: string): TranscriptParser {
       if (usage === null) return line.includes('"token_count"') ? skipped : empty;
       const ms = timestamp(event.timestamp);
       const plan = Option.getOrNull(Schema.decodeUnknownOption(Plan)(event.payload));
-      // A fork's leading burst re-stamps its parent's events, including their plans.
-      const copied = copyAnchor !== null && ms !== null && ms - copyAnchor < 1000;
 
-      if (copyAnchor !== null && ms !== null) copyAnchor = copied ? ms : null;
+      const signature = JSON.stringify(
+        usage.info === null
+          ? null
+          : [usage.info.last_token_usage, usage.info.total_token_usage ?? null],
+      );
+
+      const fresh = usage.info !== null && ms !== null && signature !== lastSignature;
+
+      // A fork's leading burst re-stamps its parent's events, including their plans. As in T3
+      // Code, only new usage extends or ends it: a rate-limit update or re-emission that follows
+      // the copies is judged by the event before it, without hiding the fork's first turn.
+      let copied = false;
+
+      if (burst !== null && ms !== null) {
+        copied = ms - (fresh ? burst.usage : burst.last) < 1000;
+        burst = copied ? { usage: fresh ? ms : burst.usage, last: ms } : fresh ? null : burst;
+      }
 
       const hints =
         ms !== null && plan !== null && !copied
@@ -131,19 +149,13 @@ export function codexParser(file: string): TranscriptParser {
 
       if (ms === null) return skipped;
       const count = usage.info.last_token_usage;
-      const signature = JSON.stringify([count, usage.info.total_token_usage ?? null]);
 
       if (signature === lastSignature) return { ...empty, hints };
       lastSignature = signature;
 
-      // Forks contain a leading re-stamped burst of their parent's history.
-      // This is a heuristic, so expose its use rather than claiming exact coverage.
-      if (copied)
-        return {
-          ...empty,
-          skipped: 1,
-          warnings: ["Codex fork-history copies were excluded using T3's timing heuristic."],
-        };
+      // Forks contain a leading re-stamped burst of their parent's history, already counted
+      // from the parent's own rollout. As in T3 Code, dropping it is not lost usage.
+      if (copied) return empty;
 
       const cacheRead = count.cached_input_tokens ?? 0;
       const cacheWrite = count.cache_write_input_tokens ?? 0;
