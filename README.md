@@ -346,35 +346,179 @@ Keep developer identity alongside exported reports when combining them across a 
 ## Sync to toki2
 
 `sync` uploads this machine's usage to a [toki2](https://github.com/ponbac/toki2)
-server, which combines every developer's machines for team reporting and billing:
+server, which combines every developer's machines for team reporting and billing.
+Run it on **every machine** where you use a coding agent, and schedule it daily.
 
-```sh
-export TOKEN_LEDGER_SERVER="https://toki.example.com"
-export TOKI_API_TOKEN="toki_…"
-bun run dev sync --dry-run   # print the payload; upload nothing
-bun run dev sync
+### Set up
+
+1. **Create an API token.** In toki2, open **Account** in the side navigation, then
+   **API tokens**, and create a token such as `token-ledger work-laptop`. The secret is
+   shown only once. A token per machine lets you revoke one machine alone.
+2. **Save the server and token** in `sync.json` in your settings directory, and make
+   the file readable only by you:
+
+   | Platform | Settings directory                                            |
+   | -------- | ------------------------------------------------------------- |
+   | Linux    | `~/.config/token-ledger` (or `$XDG_CONFIG_HOME/token-ledger`) |
+   | macOS    | `~/Library/Application Support/token-ledger`                  |
+   | Windows  | `%APPDATA%\token-ledger`                                      |
+
+   ```json
+   { "server": "https://toki.example.com", "token": "toki_…" }
+   ```
+
+   ```sh
+   chmod 600 ~/.config/token-ledger/sync.json
+   ```
+
+   A set `XDG_CONFIG_HOME` takes precedence on every platform. Alternatively set
+   `TOKEN_LEDGER_SERVER` and `TOKI_API_TOKEN`, or pass `--server`
+   and `--token`; flags win over environment variables, which win over `sync.json`.
+   The token is sent only over HTTPS, or plain HTTP to localhost, and never printed.
+
+3. **Check, then sync:**
+
+   ```sh
+   npx @ponbac/token-ledger@latest sync --dry-run   # print the payload; upload nothing
+   npx @ponbac/token-ledger@latest sync
+   ```
+
+   The first run creates `machine.json` in the settings directory with a random
+   machine ID and a label taken from the host name. Edit the label freely, but keep
+   the ID: a new ID makes the same history count again as another machine.
+
+If you map projects in a `token-ledger.json`, pass it with `--config`; scheduled jobs
+do not run in your project directory. Days follow the system time zone; add
+`--time-zone Europe/Stockholm` when a scheduler's environment may lack one.
+
+### Schedule a daily sync
+
+Schedule a daily sync to upload history before providers prune it. Missed-run
+behavior depends on the scheduler, as described below. If `npx` is not on the
+scheduler's `PATH`, use its absolute path or install the CLI globally with
+`npm install -g @ponbac/token-ledger` and run `token-ledger sync`.
+
+**Linux (systemd user timer).** Create `~/.config/systemd/user/token-ledger-sync.service`:
+
+```ini
+[Unit]
+Description=Upload AI usage to toki2
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -lc 'npx --yes @ponbac/token-ledger@latest sync'
 ```
 
-The server and API token come from `--server`/`--token`, then `TOKEN_LEDGER_SERVER`/
-`TOKI_API_TOKEN`, then `sync.json` (`{ "server": "…", "token": "…" }`) in the
-settings directory: `$XDG_CONFIG_HOME/token-ledger`, `~/.config/token-ledger` on Linux,
-`~/Library/Application Support/token-ledger` on macOS, or `%APPDATA%\token-ledger` on
-Windows. The token only travels over HTTPS, or HTTP to localhost. The first run
-creates `machine.json` there with a random machine ID and an editable label; keep it,
-since a new ID makes the same history count as another machine.
+and `~/.config/systemd/user/token-ledger-sync.timer`:
 
-Only hourly per-session totals leave the machine: tokens, request counts, and
-API-equivalent cost by project, provider, and model. Session IDs are hashed, and
-projects are configured names or Git remotes; anything identified only by a local
-path is sent as `unattributed`. Prompts, responses, individual requests, and paths
-are never uploaded. See [the payload contract](docs/sync-v1.md).
+```ini
+[Unit]
+Description=Daily AI usage sync
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=1h
+
+[Install]
+WantedBy=timers.target
+```
+
+Then run `systemctl --user enable --now token-ledger-sync.timer`. Check results with
+`journalctl --user -u token-ledger-sync`. `Persistent=true` catches missed runs when
+the user timer is next active.
+
+**cron.** Create the log directory with `mkdir -p "$HOME/.cache"`, then run
+`crontab -e` and add:
+
+```cron
+30 12 * * * /bin/sh -lc 'npx --yes @ponbac/token-ledger@latest sync' >> "$HOME/.cache/token-ledger-sync.log" 2>&1
+```
+
+cron skips runs while the machine is asleep or off; prefer the systemd timer where
+available.
+
+**macOS (launchd).** Create `~/Library/LaunchAgents/com.github.ponbac.token-ledger.sync.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.github.ponbac.token-ledger.sync</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-lc</string>
+    <string>npx --yes @ponbac/token-ledger@latest sync</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>12</integer>
+    <key>Minute</key>
+    <integer>30</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/tmp/token-ledger-sync.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/token-ledger-sync.log</string>
+</dict>
+</plist>
+```
+
+Then run `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.github.ponbac.token-ledger.sync.plist`.
+`RunAtLoad` also syncs when the agent loads at login. `StartCalendarInterval`
+[catches missed intervals after sleep](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/ScheduledJobs.html),
+but does not replay intervals missed while powered off.
+
+**Windows (Task Scheduler).** In PowerShell:
+
+```powershell
+$action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c npx --yes @ponbac/token-ledger@latest sync"
+$trigger = New-ScheduledTaskTrigger -Daily -At 12:30
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+Register-ScheduledTask -TaskName "token-ledger sync" -Action $action -Trigger $trigger -Settings $settings
+```
+
+`-StartWhenAvailable` runs a missed sync at the next opportunity. The battery
+switches allow starts on battery and keep a running sync from being stopped when
+AC power disconnects. See [Task Scheduler settings](https://learn.microsoft.com/en-us/powershell/module/scheduledtasks/new-scheduledtasksettingsset).
+
+### What leaves the machine
+
+Provider histories stay on the machine. `sync` uploads only aggregates, and only when
+you run it:
+
+- **Uploaded:** hourly totals per session, project, provider, and model: input,
+  cache, and output tokens, request counts, and API-equivalent cost. Also the window,
+  your time zone name, the machine ID and label, the CLI version, per-provider
+  coverage counts, pricing provenance, and billing plans Codex reports.
+- **Hashed:** session identities. Some providers use a transcript's file path as its
+  session, so no raw session ID is sent.
+- **Never uploaded:** prompts, responses, individual requests, source code, file or
+  directory paths, and credentials. Usage attributed only to a local directory or a
+  local-path Git remote is sent as `unattributed`; configured project names and
+  network Git remotes (`host/owner/repo`) are sent as they are.
+
+See [the payload contract](docs/sync-v1.md) for every field.
+
+### Windows and re-syncing
 
 The default window is the last 14 local days. For each provider whose history was
-fully read, the server replaces what this machine sent for it in the window, so
-re-running is safe. A provider with no history found, or with unreadable history,
-keeps its stored data, as do providers left out with `--provider`. Syncing a window
-older than a provider's retention would still replace good data with less: Claude
-Code deletes transcripts after 30 days by default, and `sync` warns about such windows.
+fully read, the server replaces what this machine previously sent for that provider
+in the window, so repeated syncs never double count, and machines add up. A provider
+with no history found, or with history that could not be read, keeps its stored data,
+as do providers left out with `--provider`: missing data is never treated as zero.
+
+Replacement also means an old window is risky: if a provider has since pruned its
+history, syncing that window again replaces good server data with smaller totals.
+Claude Code deletes transcripts after 30 days by default, so keep `--since` within
+the last 30 days; `sync` warns when it is not. Once uploaded, the server keeps the
+long-term record.
 
 Exit codes: `0` synced, `1` invalid input or settings, `2` refused by `--strict`,
 `3` server unreachable or temporarily failing (retry later), `4` token or machine
