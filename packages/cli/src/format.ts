@@ -1,6 +1,14 @@
 import { styleText } from "node:util";
 
-import { addTokens, totalTokens, zeroTokens, type UsageReport } from "@token-ledger/core/model";
+import {
+  addTokens,
+  totalTokens,
+  zeroTokens,
+  type ReportRequest,
+  type UsageReport,
+} from "@token-ledger/core/model";
+import type { SyncPayload } from "@token-ledger/core/sync";
+import { Option } from "effect";
 import Table from "cli-table3";
 import wrapAnsi from "wrap-ansi";
 
@@ -203,5 +211,33 @@ export function table(report: UsageReport, columns = 120, colorful = false): str
         ]
       : []),
     paint("dim", "USD API-equivalent estimates; not your subscription bill."),
+  ].join("\n");
+}
+
+/** What a sync uploaded, for a person or a scheduler's log; the token never appears. */
+export function syncSummary(
+  payload: SyncPayload,
+  request: ReportRequest,
+  storedBuckets: Option.Option<number>,
+): string {
+  const number = new Intl.NumberFormat("en-US");
+  const dollars = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
+  const sessions = new Set(payload.buckets.map((bucket) => bucket.sessionKey)).size;
+
+  const cost = payload.buckets.reduce((sum, bucket) => sum + (bucket.estimatedCostUsd ?? 0), 0);
+
+  const unknown = payload.buckets.some((bucket) => bucket.estimatedCostUsd === null);
+
+  return [
+    `Synced ${terminalText(payload.machine.label)} · ${request.since} through ${request.until} (${payload.timeZone})`,
+    [
+      `${number.format(payload.buckets.length)} hourly buckets`,
+      `${number.format(sessions)} sessions`,
+      `${dollars.format(cost)}${unknown ? " + unknown" : ""} API estimate`,
+      Option.match(storedBuckets, {
+        onNone: () => "accepted by the server",
+        onSome: (stored) => `server stored ${number.format(stored)}`,
+      }),
+    ].join(" · "),
   ].join("\n");
 }
