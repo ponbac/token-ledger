@@ -14,6 +14,7 @@ import {
   type Source,
 } from "@token-ledger/core/model";
 import { loadPrices } from "@token-ledger/core/pricing";
+import type { SyncPayload } from "@token-ledger/core/sync";
 import {
   Config,
   Console,
@@ -50,7 +51,7 @@ import {
   saveSyncSettings,
   settingsDirectory,
 } from "./settings.ts";
-import { upload } from "./upload.ts";
+import { hasUploaded, upload } from "./upload.ts";
 
 class CliError extends Schema.TaggedError<CliError>()("CliError", { message: Schema.String }) {}
 
@@ -345,7 +346,7 @@ const sync = Command.make(
   "sync",
   {
     ...usageFlags(
-      "13 days before --until",
+      "13 days before --until; a machine's first sync goes back to its earliest usage",
       "Exit 2 without uploading for missing/partial sources or unpriced usage",
     ),
     server: serverFlag.pipe(
@@ -370,20 +371,80 @@ const sync = Command.make(
 
     const machine = yield* loadMachine(directory);
     const ledger = yield* Ledger;
+    const client = { machine, version: metadata.version };
 
-    const payload = yield* ledger.syncPayload(request, {
-      machine,
-      version: metadata.version,
+    // Read before scanning: the server decides the window. A dry run uploads nothing, so
+    // settings it cannot read only cost it that answer.
+    const unsaved: Effect.Success<ReturnType<typeof loadSyncSettings>> = {};
+
+    const saved =
+      Option.isSome(flags.server) && Option.isSome(flags.token)
+        ? Result.succeed(unsaved)
+        : yield* loadSyncSettings(directory).pipe(Effect.result);
+
+    const settings = Result.isSuccess(saved) ? saved.success : unsaved;
+    const server = Option.orElse(flags.server, () => Option.fromUndefinedOr(settings.server));
+    const token = Option.orElse(flags.token, () => Option.fromUndefinedOr(settings.token));
+
+    // A machine's first upload takes in all its history. Only the server knows whether it
+    // holds anything for this machine; unless it plainly says it holds nothing, a window longer
+    // than the usual one could replace usage since pruned here. --since is the caller's window.
+    const unlisted =
+      Option.isSome(flags.since) || Option.isNone(server) || Option.isNone(token)
+        ? Option.none<boolean>()
+        : yield* hasUploaded(server.value, token.value, machine.id).pipe(
+            Effect.map((listed) => !listed),
+            Effect.option,
+          );
+
+    const whole = Option.contains(unlisted, true);
+
+    const reachable = Option.isSome(server) && Option.isSome(token);
+
+    // Without credentials a real sync stops below with its own message; a dry run goes on.
+    if (Option.isNone(unlisted) && Option.isNone(flags.since) && (reachable || flags.dryRun))
+      yield* Console.error(
+        `${
+          reachable
+            ? "Could not ask the server whether this machine has uploaded before"
+            : "No server and API token to ask whether this machine has uploaded before"
+        }, so the window is ${request.since} through ${request.until}. If this is its first upload, send its earlier history with --since.`,
+      );
+
+    const first = whole
+      ? yield* ledger.historyPayload(request, client)
+      : { payload: yield* ledger.syncPayload(request, client), since: request.since };
+
+    if (whole)
+      yield* Console.error(
+        `First upload from this machine: taking in all the history found, from ${first.since}. Later syncs cover the last 14 days.`,
+      );
+
+    /** Reports what could not be read, and says whether the payload falls short of --strict. */
+    const examine = Effect.fn("CLI.examine")(function* (payload: SyncPayload) {
+      for (const entry of payload.coverage) {
+        if (entry.status !== "ok")
+          yield* Console.error(
+            `${entry.provider}: ${entry.status}; ${entry.files} files, ${entry.filesBeforeWindow ?? 0} older files not opened, ${entry.unreadable} unreadable, ${entry.malformedLines} malformed lines, ${entry.skippedRecords} skipped records.${entry.status === "failed" ? " Not uploaded; the server keeps its stored usage." : ""}`,
+          );
+
+        // Later syncs cover two weeks, so history that is unreadable now needs sending by hand.
+        if (whole && entry.status === "failed")
+          yield* Console.error(
+            `${entry.provider}: once its history can be read, send the earlier part with token-ledger sync --provider ${entry.provider} --since <first day>.`,
+          );
+      }
+
+      return (
+        payload.coverage.some((entry) => entry.status !== "ok") ||
+        payload.buckets.some((bucket) => bucket.unpricedRecords > 0)
+      );
     });
 
-    for (const entry of payload.coverage) {
-      if (entry.status !== "ok")
-        yield* Console.error(
-          `${entry.provider}: ${entry.status}; ${entry.files} files, ${entry.filesBeforeWindow ?? 0} older files not opened, ${entry.unreadable} unreadable, ${entry.malformedLines} malformed lines, ${entry.skippedRecords} skipped records.${entry.status === "failed" ? " Not uploaded; the server keeps its stored usage." : ""}`,
-        );
-    }
+    const incomplete = yield* examine(first.payload);
 
     if (
+      !whole &&
       request.sources.some((source) => source.provider === "claude") &&
       request.since < addDays(today, 1 - claudeRetentionDays)
     )
@@ -391,39 +452,71 @@ const sync = Command.make(
         `Warning: the window starts more than ${claudeRetentionDays} days ago. Claude Code deletes older transcripts by default, and the server replaces the whole window, so pruned history would lower its totals.`,
       );
 
-    const incomplete =
-      payload.coverage.some((entry) => entry.status !== "ok") ||
-      payload.buckets.some((bucket) => bucket.unpricedRecords > 0);
-
     if (flags.dryRun) {
-      yield* Console.log(JSON.stringify(payload, null, 2));
+      yield* Console.log(JSON.stringify(first.payload, null, 2));
 
       if (flags.strict && incomplete) process.exitCode = 2;
 
       return;
     }
 
-    if (flags.strict && incomplete) {
+    const refused = Effect.gen(function* () {
       yield* Console.error("Not syncing: coverage is incomplete or usage is unpriced (--strict).");
       process.exitCode = 2;
+    });
 
-      return;
-    }
+    if (flags.strict && incomplete) return yield* refused;
 
-    const settings =
-      Option.isSome(flags.server) && Option.isSome(flags.token)
-        ? {}
-        : yield* loadSyncSettings(directory);
-
-    const server = Option.orElse(flags.server, () => Option.fromUndefinedOr(settings.server));
-    const token = Option.orElse(flags.token, () => Option.fromUndefinedOr(settings.token));
+    if (Result.isFailure(saved)) return yield* Effect.fail(saved.failure);
 
     if (Option.isNone(server) || Option.isNone(token))
       return yield* new CliError({
         message: `Missing ${Option.isNone(server) ? "server" : "API token"}: pass --server/--token, set TOKEN_LEDGER_SERVER/TOKI_API_TOKEN, or add it to ${directory}/sync.json.`,
       });
 
-    const outcome = yield* upload(server.value, token.value, payload).pipe(Effect.result);
+    const send = (payload: SyncPayload) =>
+      upload(server.value, token.value, payload).pipe(Effect.result);
+
+    /** Sends the usual window in place of a whole history, unless --strict forbids it. */
+    const usual = Effect.fn("CLI.usual")(function* (reason: string) {
+      yield* Console.error(
+        `${reason} Uploading ${request.since} through ${request.until} instead; send earlier history in parts with --since and --until.`,
+      );
+
+      const payload = yield* ledger.syncPayload(request, client);
+
+      return (yield* examine(payload)) && flags.strict
+        ? Option.none()
+        : Option.some({ sent: { payload, since: request.since }, outcome: yield* send(payload) });
+    });
+
+    // The scan took a while. An upload from this machine that arrived meanwhile, from another
+    // run, would be replaced by this one, so the server is asked once more before sending.
+    const still =
+      !whole ||
+      !(yield* hasUploaded(server.value, token.value, machine.id).pipe(
+        Effect.orElseSucceed(() => true),
+      ));
+
+    let result = still
+      ? Option.some({ sent: first, outcome: yield* send(first.payload) })
+      : yield* usual("This machine has uploaded since it was asked about.");
+
+    // A history the server will not take must not keep this machine from ever syncing.
+    if (
+      whole &&
+      Option.isSome(result) &&
+      Result.isFailure(result.value.outcome) &&
+      Match.value(result.value.outcome.failure).pipe(
+        Match.tag("SyncRejected", () => still),
+        Match.orElse(() => false),
+      )
+    )
+      result = yield* usual(result.value.outcome.failure.message);
+
+    if (Option.isNone(result)) return yield* refused;
+
+    const { sent, outcome } = result.value;
 
     if (Result.isFailure(outcome)) {
       yield* Console.error(outcome.failure.message);
@@ -438,7 +531,9 @@ const sync = Command.make(
       return;
     }
 
-    yield* Console.log(syncSummary(payload, request, outcome.success));
+    yield* Console.log(
+      syncSummary(sent.payload, { ...request, since: sent.since }, outcome.success),
+    );
   }),
 ).pipe(
   Command.withDescription(
