@@ -617,7 +617,8 @@ export const plan = Effect.fn("Copilot.plan")(function* (host: Host, wanted: Ena
     ...(wanted.vscode ? yield* settingsSteps(host, directory) : []),
   ];
 
-  // A variable left pointing elsewhere is read alone, which hides everything in the folder.
+  // A variable pointing elsewhere is read alone, which hides everything in the folder. A
+  // startup file only changes new terminals, so this one keeps reading that file either way.
   const elsewhere = Option.filter(host.exporter, (file) => !within(path, directory, file));
 
   const settled = steps.some(
@@ -626,16 +627,20 @@ export const plan = Effect.fn("Copilot.plan")(function* (host: Host, wanted: Ena
 
   return {
     directory,
-    steps:
-      Option.isSome(elsewhere) && !settled
-        ? [
-            ...steps,
-            Step.Note({
-              part: "cli",
-              text: `This terminal has ${variable} set to ${elsewhere.value}, outside ${directory}. While it is, reports and syncs that see the variable read only that file and skip the exports in ${directory}, VS Code's among them. Point it at ${target} to have both read.`,
-            }),
-          ]
-        : steps,
+    steps: Option.match(elsewhere, {
+      onNone: () => steps,
+      onSome: (file) => [
+        ...steps,
+        Step.Note({
+          part: "cli",
+          text: `This terminal has ${variable} set to ${file}, outside ${directory}. While it is, reports and syncs that see the variable read only that file and skip the exports in ${directory}, VS Code's among them. ${
+            settled
+              ? `Run them from a new terminal; if it still has that value, something else sets it, and should name ${target} instead.`
+              : `Point it at ${target} to have both read.`
+          }`,
+        }),
+      ],
+    }),
   };
 });
 

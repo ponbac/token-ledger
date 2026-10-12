@@ -535,13 +535,25 @@ suite("copilot enable on macOS and Linux", () => {
       assert.deepStrictEqual(tags(chat.steps), ["folder:Change", "vscode:Change", "cli:Note"]);
       assert.include(describe(chat.steps), "read only that file");
 
-      // Setting up Copilot CLI too moves the variable for new terminals, and needs no warning.
-      assert.deepStrictEqual(tags((yield* plan(elsewhere, both)).steps), [
+      // Setting up Copilot CLI too only changes new terminals; this one still reads that file.
+      const cli = yield* plan(elsewhere, both);
+
+      assert.deepStrictEqual(tags(cli.steps), [
         "folder:Change",
         "cli:Change",
         "vscode:Change",
+        "cli:Note",
       ]);
+      assert.include(describe(cli.steps), "Run them from a new terminal");
       assert.isFalse(yield* fs.exists(path.join(home, ".zshrc")));
+
+      // Nor does a startup file that is already right settle what this terminal has.
+      yield* enable(host);
+      assert.deepStrictEqual(tags((yield* plan(elsewhere, both)).steps), [
+        "cli:Kept",
+        "vscode:Kept",
+        "cli:Note",
+      ]);
     }).pipe(
       Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, noPrograms),
       Effect.provide(NodeServices.layer),
