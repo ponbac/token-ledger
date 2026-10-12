@@ -105,7 +105,8 @@ function quotable(
       );
 }
 
-const posixWord = (value: string) =>
+/** Quotes `value` as one word of a POSIX shell command, leaving plain words bare. */
+export const posixWord = (value: string) =>
   /^[\w@+=:,./-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
 
 /**
@@ -282,7 +283,16 @@ export function launchAgent(home: string, uid: number): Scheduler {
 
 const cmdWord = (value: string) => (/^[\w@+=:,./\\-]+$/.test(value) ? value : `"${value}"`);
 
-const powershellString = (value: string) => `'${value.replaceAll("'", "''")}'`;
+/** Quotes `value` as a PowerShell string literal that expands nothing. */
+export const powershellString = (value: string) => `'${value.replaceAll("'", "''")}'`;
+
+const powershellOptions = ["-NoProfile", "-NonInteractive", "-EncodedCommand"];
+
+/** Arguments that make `powershell.exe` run `script` unchanged by any shell's quoting. */
+export const powershellArguments = (script: string) => [
+  ...powershellOptions,
+  Buffer.from(script, "utf16le").toString("base64"),
+];
 
 /**
  * A Task Scheduler task for the current user. It runs a missed sync at the next opportunity
@@ -313,13 +323,11 @@ export const taskScheduler: Scheduler = {
           `Register-ScheduledTask -TaskName ${powershellString(task)} -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null`,
         ].join("\n");
 
-        const options = ["-NoProfile", "-NonInteractive", "-EncodedCommand"];
-
         return [
           Action.Run({
             program: "powershell.exe",
-            args: [...options, Buffer.from(script, "utf16le").toString("base64")],
-            shown: `powershell.exe ${options.join(" ")} <the script below, as UTF-16LE Base64>\n${script}`,
+            args: powershellArguments(script),
+            shown: `powershell.exe ${powershellOptions.join(" ")} <the script below, as UTF-16LE Base64>\n${script}`,
             outcome: "required",
             hint: "",
             gone: [],

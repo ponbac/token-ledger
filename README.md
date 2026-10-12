@@ -28,8 +28,9 @@ The default window is the current calendar month through today. `--since` and
 `--until` are inclusive local calendar days in the system time zone; select another
 IANA zone with `--time-zone`, such as `--time-zone Europe/Stockholm`. Days follow
 daylight saving time, so a day can last 23 or 25 hours. Read every
-supported source by omitting `--provider`. Configure Copilot collection before
-starting sessions as described below; installing the CLI does not enable telemetry.
+supported source by omitting `--provider`. Copilot records nothing until its export
+is switched on: run [`copilot enable`](#enable-copilots-usage-export) before starting
+sessions; installing the CLI does not enable telemetry.
 
 ```sh
 npx @ponbac/token-ledger@latest report --since 2026-09-01 --until 2026-09-30 --format csv > usage.csv
@@ -106,6 +107,75 @@ override the usual homes. Configuration supports additional accounts, machines' 
 and arbitrary source directories. Histories are opened read-only, including work
 performed outside T3 Code.
 
+### Enable Copilot's usage export
+
+Copilot writes no usage log until a local OpenTelemetry file export is switched on,
+and nothing is backfilled: sessions from before that are lost. One command switches
+it on for Copilot CLI and VS Code Copilot Chat:
+
+```sh
+npx @ponbac/token-ledger@latest copilot enable
+```
+
+It lists the changes it is about to make and asks before making them:
+
+- It creates `~/.copilot/otel` (`$COPILOT_HOME/otel` when `COPILOT_HOME` is set), the
+  folder reports and syncs read by default.
+- **Copilot CLI** (`--cli`): it makes `COPILOT_OTEL_FILE_EXPORTER_PATH` name
+  `usage.jsonl` in that folder for every new terminal. On Windows that is a user
+  environment variable. On macOS and Linux it is two lines at the end of your login
+  shell's startup file: `~/.zshrc` for zsh (`$ZDOTDIR/.zshrc` when set); `~/.bashrc`
+  for bash on Linux, and on macOS the profile a login bash reads (`~/.bash_profile`,
+  `~/.bash_login`, or `~/.profile`); for fish, its own
+  `~/.config/fish/conf.d/token-ledger-copilot.fish`.
+- **VS Code Copilot Chat** (`--vscode`): it sets the four `github.copilot.chat.otel.*`
+  settings shown [below](#vs-code-copilot-chat) in the user `settings.json`, with this
+  machine's path to `vscode-chat.jsonl` in the same folder. Comments, trailing commas,
+  and every other setting stay exactly as they were.
+
+| Platform | VS Code user settings                                                               |
+| -------- | ----------------------------------------------------------------------------------- |
+| Linux    | `~/.config/Code/User/settings.json` (or `$XDG_CONFIG_HOME/Code/User/settings.json`) |
+| macOS    | `~/Library/Application Support/Code/User/settings.json`                             |
+| Windows  | `%APPDATA%\Code\User\settings.json`                                                 |
+
+| Flag           | Effect                                                               |
+| -------------- | -------------------------------------------------------------------- |
+| `--cli`        | Only Copilot CLI; with neither `--cli` nor `--vscode`, both are done |
+| `--vscode`     | Only VS Code Copilot Chat                                            |
+| `--dry-run`    | Print the changes, and change nothing                                |
+| `--yes`        | Make the changes without asking, as a script must                    |
+| `--allow-root` | Run as root, where root is the account that uses Copilot             |
+
+Everything it touches is in your own profile, so it needs no admin rights. Run it as
+yourself: under `sudo` the folder and files would belong to root, and Copilot and
+VS Code could no longer write them, so it refuses to run as root.
+
+Running it again is safe: what is already in place is left alone. Where it cannot
+do a part, it finishes the others and prints the exact line or settings to add by
+hand. That is the case for a shell other than bash, zsh, or fish, a startup file that
+already sets the variable to something else or without `export`, a file it cannot
+write, a `settings.json` with a syntax error, and a machine with no VS Code settings
+folder. A file is replaced in one step, so a write that fails leaves it as it was, and
+a symbolic link keeps pointing at the file it names.
+
+Exit codes: `0` when everything asked for is in place, `2` when a part is left for
+you, and `1` when nothing was changed because it was declined, had no terminal to ask
+on without `--yes`, or was run as root.
+
+The VS Code settings are application-wide, so the default profile's `settings.json`
+covers every profile. VS Code Insiders is set up too when it is installed, with its
+own `vscode-insiders-chat.jsonl`. Remote hosts (SSH, WSL, dev containers) are not:
+run the command on the host where Copilot runs, or follow the steps below there.
+VS Code started from an environment that has `COPILOT_OTEL_FILE_EXPORTER_PATH` writes
+its Chat export to that file instead of `outfile`; both are in the folder that is
+read. Afterwards, open a new terminal for Copilot CLI, and reload or restart VS Code
+and start a new chat.
+
+The rest of this section is the same setup by hand.
+
+### Copilot CLI
+
 Copilot CLI requires enabling its own file export **before** a session starts:
 
 ```sh
@@ -123,8 +193,10 @@ copilot
 ```
 
 Setting the file path automatically enables telemetry export to that local file;
-no separate toggle or telemetry server is needed. Prompt and response content
-capture is off by default.
+no separate toggle or telemetry server is needed. Copilot CLI leaves prompts and
+responses out of the export unless you turn its content capture on. Either way the
+export is a local file: Token Ledger takes only accounting attributes from it and
+never uploads content.
 
 The commands above set the variable for the current shell. To persist it for future
 Windows terminals, also run:
@@ -146,7 +218,9 @@ cache-token attributes are accepted. See the [Copilot CLI reference](https://doc
 
 ### VS Code Copilot Chat
 
-In your active VS Code profile's user settings, enable local file export:
+In VS Code's user settings (**Preferences: Open User Settings (JSON)**), enable local
+file export. The settings are application-wide, so they belong in the default profile's
+`settings.json` and apply to every profile:
 
 ```json
 {
@@ -162,6 +236,14 @@ directory, reload VS Code, and start a new chat. On Windows, use a path such as
 `C:/Users/you/.copilot/otel/vscode-chat.jsonl`. See the
 [VS Code monitoring documentation](https://code.visualstudio.com/docs/agents/guides/monitoring-agents).
 
+`captureContent: false` asks VS Code to leave prompts and responses out of the export,
+but do not count on the local file being free of them: an
+[open VS Code issue](https://github.com/microsoft/vscode/issues/326254) reports spans
+that carry prompts, system instructions, responses, and tool arguments whatever the
+setting says. What the file holds stays on this machine. Token Ledger takes only
+accounting attributes from it (token counts, models, timestamps, and repository
+linkage) and never uploads content; see [what leaves the machine](#what-leaves-the-machine).
+
 Read that export, or combine CLI and Chat files from the same directory:
 
 ```sh
@@ -169,8 +251,13 @@ bun run dev report --provider copilot --source ~/.copilot/otel/vscode-chat.jsonl
 bun run dev report --provider copilot --source ~/.copilot/otel
 ```
 
-Both use the `copilot` provider. Default discovery reads `~/.copilot/otel`, unless
-`COPILOT_OTEL_FILE_EXPORTER_PATH` selects a specific file; `--source` overrides it.
+Both use the `copilot` provider. Default discovery reads every `.jsonl` and `.db`
+export in `~/.copilot/otel`. `COPILOT_OTEL_FILE_EXPORTER_PATH` naming a file in that
+directory does not narrow this, so a VS Code export beside it is still read; a file
+there with another extension is read as well. Naming a file outside the directory
+selects that one file instead, and the directory is then not read: keep the exports
+together, or list both under `sources` in a configuration. `--source` overrides
+discovery.
 VS Code inference events require a response ID, timestamp, and input/output token
 counts. Missing or invalid fields are reported as skipped usage. Response IDs
 deduplicate copied events and matching request spans. Agent turn summaries,
@@ -203,8 +290,12 @@ and targets 1.140 in the [tracking issue](https://github.com/microsoft/vscode/is
 Token Ledger supports the corrected format, but cannot reconstruct spans already
 lost from an export.
 
-On affected builds, enable the **built-in SQLite span exporter** alongside the file
-settings above:
+On affected builds, you can enable the **built-in SQLite span exporter** alongside the
+file settings above. Decide first whether you want what it stores: the span database,
+`agent-traces.db`, holds prompts and responses whatever `captureContent` says. In
+VS Code 1.141.0 that setting filters the file export but is not applied to the
+database. It is a local file, and Token Ledger selects only accounting attributes
+from it and uploads no content, but the content is on disk.
 
 ```json
 {
@@ -423,7 +514,9 @@ does not keep a process running. Run it again to change the job.
 | Windows  | Task Scheduler task | Runs at the next opportunity, on battery power as well |
 
 The job needs the server and token saved by `login`: it cannot read `--token` or
-variables set only in your shell, such as `TOKI_API_TOKEN` or `CLAUDE_CONFIG_DIR`.
+variables set only in your shell, such as `TOKI_API_TOKEN`, `CLAUDE_CONFIG_DIR`, or a
+`COPILOT_OTEL_FILE_EXPORTER_PATH` that names a file outside `~/.copilot/otel`; the job
+then reads that directory while a sync from your terminal reads the file.
 The exception is `XDG_CONFIG_HOME`, which `schedule install` copies into the job so
 that it reads the same settings directory.
 It runs `npx --yes @ponbac/token-ledger@latest sync`, so it stays up to date. It
