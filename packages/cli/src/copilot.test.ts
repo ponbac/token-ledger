@@ -202,6 +202,23 @@ suite("shell startup file", () => {
     );
   });
 
+  it("looks past lines that only read the variable", () => {
+    const reading =
+      'echo "$COPILOT_OTEL_FILE_EXPORTER_PATH"\n[ -n "${COPILOT_OTEL_FILE_EXPORTER_PATH}" ] && true\n';
+
+    assert.strictEqual(edit(`${exported}\n${reading}`), null);
+    assert.deepStrictEqual(
+      edit(reading),
+      StartupEdit.Append({ text: `\n${marker}\n${exported}\n` }),
+    );
+
+    // A line that takes the value away again does count.
+    assert.deepStrictEqual(
+      edit(`${exported}\nunset COPILOT_OTEL_FILE_EXPORTER_PATH\n`),
+      StartupEdit.Conflict({ line: 2, text: "unset COPILOT_OTEL_FILE_EXPORTER_PATH" }),
+    );
+  });
+
   it("does not take an assignment without export for an exported one", () => {
     // The shell would keep such a variable to itself, and Copilot would never see it.
     assert.deepStrictEqual(
@@ -575,6 +592,14 @@ suite("copilot enable on macOS and Linux", () => {
         /cannot write to .*sudo chown/,
       );
       assert.isFalse(yield* fs.exists(path.join(owned.home, ".zshrc")));
+
+      // An export of the part not asked for does not hold up the one that was.
+      yield* fs.writeFileString(path.join(exports, "vscode-chat.jsonl"), "");
+      yield* fs.chmod(path.join(exports, "vscode-chat.jsonl"), 0o444);
+      assert.deepStrictEqual(tags((yield* plan(owned.host, { ...both, vscode: false })).steps), [
+        "cli:Change",
+      ]);
+      assert.isTrue(Result.isFailure(yield* plan(owned.host, both).pipe(Effect.result)));
     }).pipe(
       Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, noPrograms),
       Effect.provide(NodeServices.layer),

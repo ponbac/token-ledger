@@ -156,6 +156,14 @@ function assignedValue(assigned: string, home: string): Option.Option<string> {
   return expanded.includes("$") ? Option.none() : Option.some(expanded);
 }
 
+/**
+ * Whether a startup-file line can change the variable: it names it other than to read it, as
+ * an assignment, `export`, `unset`, or fish's `set` does. A comment, or a line that only
+ * expands `$NAME` or `${NAME}`, leaves the value as it was.
+ */
+const touches = (line: string) =>
+  !/^\s*#/.test(line) && new RegExp(`(?<![$\\w{])${variable}\\b`).test(line);
+
 /** A change a shell startup file needs so that new shells export the variable. */
 export type StartupEdit = Data.TaggedEnum<{
   Append: { readonly text: string };
@@ -182,8 +190,8 @@ export const exportsTo = (target: string, home: string) => (line: string) =>
 
 /**
  * Compares a startup file with the `wanted` line; `None` when the file already does the job.
- * Only the last line that mentions the variable counts, as it does in a shell, and `satisfies`
- * says whether that line exports the variable as wanted.
+ * Only the last line that can change the variable counts, as it does in a shell, and
+ * `satisfies` says whether that line exports the variable as wanted.
  */
 export function startupEdit(
   contents: string,
@@ -192,7 +200,7 @@ export function startupEdit(
 ): Option.Option<StartupEdit> {
   const lines = contents.split("\n");
 
-  const index = lines.findLastIndex((line) => !/^\s*#/.test(line) && line.includes(variable));
+  const index = lines.findLastIndex(touches);
 
   const current = lines[index];
 
@@ -360,7 +368,7 @@ const startupSteps = Effect.fn("Copilot.startupSteps")(function* (host: Host, ta
         other,
         found: Option.getOrElse(text, () => "")
           .split("\n")
-          .find((entry) => !/^\s*#/.test(entry) && entry.includes(variable)),
+          .find(touches),
       })),
     ),
   ]).pipe(Effect.option);
@@ -656,11 +664,12 @@ export const plan = Effect.fn("Copilot.plan")(function* (host: Host, wanted: Ena
     });
 
   // A folder or export left behind by an earlier run under sudo belongs to root: the settings
-  // would be right, and Copilot and VS Code still could not record anything.
+  // would be right, and Copilot and VS Code still could not record anything. Only the exports
+  // of the parts asked for are checked, so one part is not held up by the other's file.
   for (const entry of [
     directory,
-    target,
-    ...builds.map((build) => path.join(directory, build.file)),
+    ...(wanted.cli ? [target] : []),
+    ...(wanted.vscode ? builds.map((build) => path.join(directory, build.file)) : []),
   ]) {
     const locked = yield* fs.access(entry, { writable: true }).pipe(
       Effect.as(false),
