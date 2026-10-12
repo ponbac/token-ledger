@@ -655,6 +655,29 @@ export const plan = Effect.fn("Copilot.plan")(function* (host: Host, wanted: Ena
       message: `${directory} exists but is not a folder, so Copilot cannot write its export there. Move it away, then run this again.`,
     });
 
+  // A folder or export left behind by an earlier run under sudo belongs to root: the settings
+  // would be right, and Copilot and VS Code still could not record anything.
+  for (const entry of [
+    directory,
+    target,
+    ...builds.map((build) => path.join(directory, build.file)),
+  ]) {
+    const locked = yield* fs.access(entry, { writable: true }).pipe(
+      Effect.as(false),
+      Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(false)),
+      Effect.orElseSucceed(() => true),
+    );
+
+    if (locked)
+      return yield* new CopilotError({
+        message: `Your account cannot write to ${entry}, so Copilot could not record its usage there. Give your account write access to it, then run this again.${
+          host.platform === "win32"
+            ? ""
+            : ` If it was created with sudo, take it back with: sudo chown -R "$(id -un)" ${posixWord(directory)}`
+        }`,
+      });
+  }
+
   const steps = [
     ...(Option.isSome(existing)
       ? []

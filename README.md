@@ -163,8 +163,9 @@ folder. A file is replaced in one step, so a write that fails leaves it as it wa
 a symbolic link keeps pointing at the file it names.
 
 Exit codes: `0` when everything asked for is in place, `2` when a part is left for
-you, and `1` when nothing was changed because it was declined, had no terminal to ask
-on without `--yes`, or was run as root.
+you, and `1` when nothing was changed: it was declined, had no terminal to ask on
+without `--yes`, was run as root, or found that the export folder is a file or cannot
+be written by your account, as after an earlier run under `sudo`.
 
 The VS Code settings are application-wide, so the default profile's `settings.json`
 covers every profile. VS Code Insiders is set up too when it is installed, with its

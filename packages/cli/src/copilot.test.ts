@@ -546,7 +546,7 @@ suite("copilot enable on macOS and Linux", () => {
     ),
   );
 
-  it.effect("stops when the export folder's path is taken by a file", () =>
+  it.effect("stops when the export folder is a file or cannot be written", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
@@ -559,6 +559,22 @@ suite("copilot enable on macOS and Linux", () => {
 
       assert.match(Result.isFailure(refused) ? refused.failure.message : "", /is not a folder/);
       assert.isFalse(yield* fs.exists(path.join(home, ".zshrc")));
+
+      // A folder left behind by sudo is there, yet nothing could be recorded in it.
+      const owned = yield* machine("linux", "/bin/zsh");
+      const exports = path.join(owned.home, ".copilot", "otel");
+
+      yield* fs.makeDirectory(exports, { recursive: true });
+      yield* fs.chmod(exports, 0o555);
+
+      const locked = yield* plan(owned.host, both).pipe(Effect.result);
+
+      yield* fs.chmod(exports, 0o755);
+      assert.match(
+        Result.isFailure(locked) ? locked.failure.message : "",
+        /cannot write to .*sudo chown/,
+      );
+      assert.isFalse(yield* fs.exists(path.join(owned.home, ".zshrc")));
     }).pipe(
       Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, noPrograms),
       Effect.provide(NodeServices.layer),
