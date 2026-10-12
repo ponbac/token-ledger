@@ -106,28 +106,50 @@ const tags = (steps: ReadonlyArray<Step>) => steps.map((step) => `${step.part}:$
 suite("default Copilot sources", () => {
   it.effect("reads the export folder even when the variable names one file in it", () =>
     Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const directory = path.resolve("home", ".copilot", "otel");
-      const sources = (file: string) => copilotSources(path, directory, Option.some(file));
+      const root = yield* fs.makeTempDirectoryScoped();
+      const directory = path.join(root, ".copilot", "otel");
+      const sources = (file: string) => copilotSources(directory, Option.some(file));
 
-      assert.deepStrictEqual(copilotSources(path, directory, Option.none()), [directory]);
-      assert.deepStrictEqual(sources(path.join(directory, "usage.jsonl")), [directory]);
-      assert.deepStrictEqual(sources(path.join(directory, "cli", "spans.db")), [directory]);
-      assert.deepStrictEqual(sources(directory), [directory]);
+      yield* fs.makeDirectory(directory, { recursive: true });
+
+      assert.deepStrictEqual(yield* copilotSources(directory, Option.none()), [directory]);
+      assert.deepStrictEqual(yield* sources(path.join(directory, "usage.jsonl")), [directory]);
+      assert.deepStrictEqual(yield* sources(path.join(directory, "cli", "spans.db")), [directory]);
+      assert.deepStrictEqual(yield* sources(directory), [directory]);
 
       // A scan of the folder passes over other extensions, so such a file is named as well.
-      assert.deepStrictEqual(sources(path.join(directory, "usage.log")), [
+      assert.deepStrictEqual(yield* sources(path.join(directory, "usage.log")), [
         directory,
         path.join(directory, "usage.log"),
       ]);
 
       // A file elsewhere is a deliberate choice of that one export, read alone as before.
       for (const elsewhere of [
-        path.resolve("exports", "usage.jsonl"),
+        path.join(root, "exports", "usage.jsonl"),
         path.join(`${directory}-old`, "usage.jsonl"),
         path.join(path.dirname(directory), "usage.jsonl"),
       ])
-        assert.deepStrictEqual(sources(elsewhere), [elsewhere], elsewhere);
+        assert.deepStrictEqual(yield* sources(elsewhere), [elsewhere], elsewhere);
+
+      // The same folder under another name, through a link, is still that folder.
+      const alias = path.join(root, "alias");
+
+      yield* fs.symlink(path.join(root, ".copilot"), alias);
+      assert.deepStrictEqual(yield* sources(path.join(alias, "otel", "usage.jsonl")), [directory]);
+      assert.deepStrictEqual(
+        yield* copilotSources(
+          path.join(alias, "otel"),
+          Option.some(path.join(directory, "usage.jsonl")),
+        ),
+        [path.join(alias, "otel")],
+      );
+
+      // A link inside the folder to a file kept elsewhere is read with the folder.
+      yield* fs.writeFileString(path.join(root, "kept.jsonl"), "");
+      yield* fs.symlink(path.join(root, "kept.jsonl"), path.join(directory, "linked.jsonl"));
+      assert.deepStrictEqual(yield* sources(path.join(directory, "linked.jsonl")), [directory]);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 });

@@ -23,12 +23,26 @@ const builds = [
   { name: "VS Code Insiders", folder: "Code - Insiders", file: "vscode-insiders-chat.jsonl" },
 ] as const;
 
-/** Whether `file` is `directory` or lies below it. */
-function within(path: Path.Path, directory: string, file: string) {
-  const relative = path.relative(directory, file);
+/**
+ * Where `file` lies relative to `directory`, or `None` when it is neither the directory nor
+ * below it. Links can give one folder two names, so the folders are compared by where they
+ * lead; the file's own name is kept, since a link inside the folder is still read with it.
+ */
+const placed = Effect.fn("Copilot.placed")(function* (directory: string, file: string) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
 
-  return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
-}
+  const resolved = (folder: string) => fs.realPath(folder).pipe(Effect.orElseSucceed(() => folder));
+
+  const relative = path.relative(
+    yield* resolved(directory),
+    path.join(yield* resolved(path.dirname(file)), path.basename(file)),
+  );
+
+  return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)
+    ? Option.some(relative)
+    : Option.none<string>();
+});
 
 /**
  * The default Copilot sources. The export directory is read whole, so a file Copilot CLI is
@@ -36,19 +50,20 @@ function within(path: Path.Path, directory: string, file: string) {
  * when a directory scan, which takes only `.jsonl` and `.db` files, would pass over it. A file
  * outside the directory is a deliberate choice of that one export, and is read alone.
  */
-export function copilotSources(
-  path: Path.Path,
+export const copilotSources = Effect.fn("Copilot.sources")(function* (
   directory: string,
   exporter: Option.Option<string>,
-): ReadonlyArray<string> {
+) {
   if (Option.isNone(exporter)) return [directory];
 
-  if (!within(path, directory, exporter.value)) return [exporter.value];
+  const relative = yield* placed(directory, exporter.value);
 
-  return /\.(?:jsonl|db)$/.test(exporter.value) || path.relative(directory, exporter.value) === ""
+  if (Option.isNone(relative)) return [exporter.value];
+
+  return /\.(?:jsonl|db)$/.test(relative.value) || relative.value === ""
     ? [directory]
     : [directory, exporter.value];
-}
+});
 
 /** The machine and account `copilot enable` changes. Every path is absolute. */
 export interface Host {
@@ -660,7 +675,12 @@ export const plan = Effect.fn("Copilot.plan")(function* (host: Host, wanted: Ena
 
   // A variable pointing elsewhere is read alone, which hides everything in the folder. A
   // startup file only changes new terminals, so this one keeps reading that file either way.
-  const elsewhere = Option.filter(host.exporter, (file) => !within(path, directory, file));
+  const elsewhere = Option.isSome(host.exporter)
+    ? Option.match(yield* placed(directory, host.exporter.value), {
+        onNone: () => host.exporter,
+        onSome: () => Option.none<string>(),
+      })
+    : Option.none<string>();
 
   const settled = steps.some(
     (step) => step.part === "cli" && (Step.$is("Change")(step) || Step.$is("Kept")(step)),

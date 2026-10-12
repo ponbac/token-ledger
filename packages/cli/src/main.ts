@@ -184,11 +184,10 @@ const usageRequest = Effect.fn("CLI.usageRequest")(function* (
     { provider: "codex", path: path.join(expand(codexHome), "archived_sessions") },
     { provider: "claude", path: path.join(expand(claudeHome), "projects") },
     { provider: "grok", path: path.join(expand(grokHome), "sessions") },
-    ...copilotSources(
-      path,
+    ...(yield* copilotSources(
       path.join(expand(copilotHome), "otel"),
       Option.map(copilotFile, (value) => expand(value)),
-    ).map((source): Source => ({ provider: "copilot", path: source })),
+    )).map((source): Source => ({ provider: "copilot", path: source })),
     {
       provider: "pi",
       path: Option.match(piSessions, {
