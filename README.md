@@ -264,7 +264,8 @@ bun run dev report --provider copilot --source ~/.copilot/otel
 Both use the `copilot` provider. Default discovery reads every `.jsonl` and `.db`
 export in `~/.copilot/otel`. `COPILOT_OTEL_FILE_EXPORTER_PATH` naming a file in that
 directory does not narrow this, so a VS Code export beside it is still read; a file
-there with another extension is read as well. Naming a file outside the directory
+there with another extension is read as well, as a source of its own, so name exports
+`.jsonl` to have them correlated with the rest. Naming a file outside the directory
 selects that one file instead, and the directory is then not read: keep the exports
 together, or list both under `sources` in a configuration. `--source` overrides
 discovery.

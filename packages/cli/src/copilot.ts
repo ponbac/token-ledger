@@ -724,16 +724,28 @@ export const describe = (steps: ReadonlyArray<Step>) =>
 /**
  * Replaces `file` with `contents` in one step: the text is complete under another name before
  * it takes this one, so a write that fails part-way leaves the original as it was. A symbolic
- * link stays a link, with the file it names replaced, and the file keeps its permissions.
+ * link stays a link, with the file it names replaced, and the file keeps its permissions. A
+ * link whose file does not exist is a `CopilotError`: writing there would replace the link.
  */
 const replaceFile = Effect.fn("Copilot.replaceFile")(function* (file: string, contents: string) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
 
   yield* Effect.gen(function* () {
-    const target = yield* fs
-      .realPath(file)
-      .pipe(Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(file)));
+    const target = yield* fs.realPath(file).pipe(
+      Effect.catchReason("PlatformError", "NotFound", () =>
+        // A link to a file that is not there yet would be replaced by the file itself.
+        Effect.matchEffect(fs.readLink(file), {
+          onFailure: () => Effect.succeed(file),
+          onSuccess: (destination) =>
+            Effect.fail(
+              new CopilotError({
+                message: `${file} is a link to ${destination}, which does not exist, so it was left alone.`,
+              }),
+            ),
+        }),
+      ),
+    );
 
     const mode = yield* fs.stat(target).pipe(
       Effect.map((info) => Option.some(info.mode & 0o7777)),
@@ -795,7 +807,10 @@ export const perform = Effect.fn("Copilot.perform")(function* (steps: ReadonlyAr
             yield* replaceFile(file, contents);
 
             return done;
-          }).pipe(Effect.orElseSucceed(() => failed(`Cannot write ${file}.`))),
+          }).pipe(
+            Effect.catchTag("CopilotError", ({ message }) => Effect.succeed(failed(message))),
+            Effect.orElseSucceed(() => failed(`Cannot write ${file}.`)),
+          ),
         Run: ({ program, args }) =>
           spawner
             .exitCode(

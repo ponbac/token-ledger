@@ -505,6 +505,19 @@ suite("copilot enable on macOS and Linux", () => {
       assert.strictEqual(yield* fs.readLink(settings), dotfiles);
       assert.include(yield* fs.readFileString(dotfiles), "github.copilot.chat.otel.outfile");
       assert.strictEqual((yield* fs.stat(dotfiles)).mode & 0o777, 0o600);
+
+      // A link to a file that is not there yet stays a link, and is the person's to complete.
+      const pending = yield* machine("linux", "/bin/zsh");
+      const absent = path.join(pending.home, "dotfiles", "settings.json");
+
+      yield* fs.symlink(absent, pending.settings);
+
+      const results = yield* enable(pending.host, { ...both, cli: false });
+
+      assert.deepStrictEqual(tags(results), ["folder:Done", "vscode:ByHand"]);
+      assert.include(describe(results), "which does not exist, so it was left alone");
+      assert.strictEqual(yield* fs.readLink(pending.settings), absent);
+      assert.isFalse(yield* fs.exists(absent));
     }).pipe(
       Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, noPrograms),
       Effect.provide(NodeServices.layer),
