@@ -11,6 +11,7 @@
     "@token-ledger/core": "workspace:*",
     "cli-table3": "^0.6.5",
     "effect": "4.0.0",
+    "jsonc-parser": "^3.3.1",
     "wrap-ansi": "^10.0.2"
   },
   "description": "Local AI token usage and API-equivalent cost reports by project",

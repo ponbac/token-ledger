@@ -1,9 +1,17 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -394,6 +402,191 @@ await test("login saves what a scheduled sync needs, and schedule install change
 
     for (const output of [plan, refused, login])
       assert.doesNotMatch(output.stdout + output.stderr, new RegExp(token));
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+await test("copilot enable sets the export up once, and reports then read both exports together", () => {
+  const directory = mkdtempSync(join(tmpdir(), "token-ledger-copilot-"));
+  const appData = join(directory, "AppData", "Roaming");
+
+  const roots = {
+    win32: appData,
+    darwin: join(directory, "Library", "Application Support"),
+  };
+
+  const settings = join(
+    process.platform === "win32" || process.platform === "darwin"
+      ? roots[process.platform]
+      : join(directory, "config"),
+    "Code",
+    "User",
+    "settings.json",
+  );
+
+  const exports = join(directory, ".copilot", "otel");
+
+  try {
+    mkdirSync(dirname(settings), { recursive: true });
+    writeFileSync(
+      settings,
+      '{\n  // appearance\n  "workbench.colorTheme": "Dark", // the good one\n  "editor.rulers": [80, 120,],\n}\n',
+    );
+
+    /** @param {string[]} args @param {Record<string, string>} variables */
+    const run = (args, variables = {}) => {
+      // The developer's own Copilot setup must neither be read nor changed.
+      const {
+        COPILOT_HOME: _home,
+        COPILOT_OTEL_FILE_EXPORTER_PATH: _file,
+        ZDOTDIR: _zsh,
+        ...env
+      } = process.env;
+
+      return spawnSync(process.execPath, [join(packageDirectory, "dist/main.js"), ...args], {
+        cwd: directory,
+        encoding: "utf8",
+        timeout: 60_000,
+        env: {
+          ...env,
+          HOME: directory,
+          USERPROFILE: directory,
+          APPDATA: appData,
+          XDG_CONFIG_HOME: join(directory, "config"),
+          XDG_CACHE_HOME: join(directory, "cache"),
+          SHELL: "/bin/zsh",
+          ...variables,
+        },
+      });
+    };
+
+    // Windows keeps the variable in the user's own environment, which a test must not touch.
+    const parts = process.platform === "win32" ? ["--vscode"] : ["--cli", "--vscode"];
+    const plan = run(["copilot", "enable", ...parts, "--dry-run"]);
+
+    assert.equal(plan.status, 0, plan.stderr);
+    assert.ok(plan.stdout.includes(settings));
+    assert.equal(existsSync(exports), false);
+
+    const unasked = run(["copilot", "enable", ...parts]);
+
+    assert.equal(unasked.status, 1);
+    assert.match(unasked.stderr, /--yes/);
+    assert.equal(existsSync(exports), false);
+
+    const enabled = run(["copilot", "enable", ...parts, "--yes"]);
+
+    assert.equal(enabled.status, 0, enabled.stderr);
+
+    const outfile = `${exports.replaceAll("\\", "/")}/vscode-chat.jsonl`;
+    const edited = readFileSync(settings, "utf8");
+
+    assert.equal(
+      edited,
+      `{\n  // appearance\n  "workbench.colorTheme": "Dark", // the good one\n  "editor.rulers": [80, 120,],\n  "github.copilot.chat.otel.enabled": true,\n  "github.copilot.chat.otel.exporterType": "file",\n  "github.copilot.chat.otel.outfile": ${JSON.stringify(outfile)},\n  "github.copilot.chat.otel.captureContent": false,\n  "settingsSync.ignoredSettings": ["github.copilot.chat.otel.outfile"],\n}\n`,
+    );
+
+    const startup = join(directory, ".zshrc");
+
+    if (process.platform !== "win32")
+      assert.match(
+        readFileSync(startup, "utf8"),
+        /\nexport COPILOT_OTEL_FILE_EXPORTER_PATH="\$HOME\/\.copilot\/otel\/usage\.jsonl"\n$/,
+      );
+
+    const again = run(["copilot", "enable", ...parts, "--yes"]);
+
+    assert.equal(again.status, 0, again.stderr);
+    assert.match(again.stdout, /nothing to change/);
+    assert.equal(readFileSync(settings, "utf8"), edited);
+
+    if (process.platform !== "win32")
+      assert.equal(
+        readFileSync(startup, "utf8").split("COPILOT_OTEL_FILE_EXPORTER_PATH=").length,
+        2,
+      );
+
+    /** @param {string} id */
+    const inference = (id) =>
+      `${JSON.stringify({
+        hrTime: [Date.parse("2026-09-22T10:00:00Z") / 1000, 0],
+        attributes: {
+          "event.name": "gen_ai.client.inference.operation.details",
+          "gen_ai.operation.name": "chat",
+          "gen_ai.response.id": id,
+          "gen_ai.response.model": "fixture-model",
+          "gen_ai.usage.input_tokens": 100,
+          "gen_ai.usage.output_tokens": 20,
+        },
+      })}\n`;
+
+    const configuration = join(directory, "token-ledger.json");
+
+    writeFileSync(
+      configuration,
+      JSON.stringify({
+        prices: { "fixture-model": { input: 2, output: 10, cacheRead: 0.2, cacheWrite: null } },
+      }),
+    );
+    writeFileSync(join(exports, "usage.jsonl"), inference("cli"));
+    writeFileSync(join(exports, "vscode-chat.jsonl"), inference("chat-1") + inference("chat-2"));
+
+    /** @param {string} exporter */
+    const read = (exporter) => {
+      const report = run(
+        [
+          "report",
+          "--provider",
+          "copilot",
+          "--offline",
+          "--json",
+          "--strict",
+          "--config",
+          configuration,
+          "--since",
+          "2026-09-22",
+          "--until",
+          "2026-09-22",
+          "--time-zone",
+          "UTC",
+        ],
+        { COPILOT_OTEL_FILE_EXPORTER_PATH: exporter },
+      );
+
+      assert.equal(report.status, 0, report.stderr);
+
+      const { rows, coverage } = decodeReport(report.stdout);
+
+      return {
+        records: rows.reduce((total, row) => total + row.records, 0),
+        sources: coverage.map((source) => [source.source, source.status, source.files]),
+      };
+    };
+
+    // The variable `--cli` persists names one file; the VS Code export beside it still counts.
+    assert.deepEqual(read(join(exports, "usage.jsonl")), {
+      records: 3,
+      sources: [[exports, "ok", 2]],
+    });
+
+    // A file a scan of the folder would pass over is still read, beside the folder.
+    const log = join(exports, "usage.log");
+
+    writeFileSync(log, inference("cli-log"));
+    assert.deepEqual(read(log), {
+      records: 4,
+      sources: [
+        [exports, "ok", 2],
+        [log, "ok", 1],
+      ],
+    });
+
+    // A file outside the folder is a deliberate choice of that one export, read alone.
+    const elsewhere = join(directory, "elsewhere.jsonl");
+
+    writeFileSync(elsewhere, inference("elsewhere"));
+    assert.deepEqual(read(elsewhere), { records: 1, sources: [[elsewhere, "ok", 1]] });
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

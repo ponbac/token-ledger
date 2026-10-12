@@ -31,6 +31,15 @@ import { FetchHttpClient } from "effect/http";
 
 import metadata from "../package.json" with { type: "json" };
 
+import {
+  type Host,
+  Step,
+  copilotSources,
+  describe as describeEnabling,
+  perform as enable,
+  plan as planEnabling,
+  summarize,
+} from "./copilot.ts";
 import { csv, syncSummary, table } from "./format.ts";
 import { TimeOfDay, describe, hostScheduler, perform } from "./schedule.ts";
 import {
@@ -175,13 +184,10 @@ const usageRequest = Effect.fn("CLI.usageRequest")(function* (
     { provider: "codex", path: path.join(expand(codexHome), "archived_sessions") },
     { provider: "claude", path: path.join(expand(claudeHome), "projects") },
     { provider: "grok", path: path.join(expand(grokHome), "sessions") },
-    {
-      provider: "copilot",
-      path: Option.match(copilotFile, {
-        onNone: () => path.join(expand(copilotHome), "otel"),
-        onSome: (value) => expand(value),
-      }),
-    },
+    ...(yield* copilotSources(
+      path.join(expand(copilotHome), "otel"),
+      Option.map(copilotFile, (value) => expand(value)),
+    )).map((source): Source => ({ provider: "copilot", path: source })),
     {
       provider: "pi",
       path: Option.match(piSessions, {
@@ -607,6 +613,124 @@ const schedule = Command.make("schedule").pipe(
   Command.withSubcommands([scheduleInstall, scheduleStatus, scheduleUninstall]),
 );
 
+const copilotEnable = Command.make(
+  "enable",
+  {
+    cli: Flag.Boolean("cli").pipe(
+      Flag.withDefault(false),
+      Flag.withDescription("Copilot CLI: export its usage from every new terminal"),
+    ),
+    vscode: Flag.Boolean("vscode").pipe(
+      Flag.withDefault(false),
+      Flag.withDescription("VS Code Copilot Chat: set its export in the user settings.json"),
+    ),
+    yes: Flag.Boolean("yes").pipe(
+      Flag.withDefault(false),
+      Flag.withDescription("Make the listed changes without asking"),
+    ),
+    dryRun: Flag.Boolean("dry-run").pipe(
+      Flag.withDefault(false),
+      Flag.withDescription("Print the changes; change nothing"),
+    ),
+    allowRoot: Flag.Boolean("allow-root").pipe(
+      Flag.withDefault(false),
+      Flag.withDescription("Run as root, where root is the account that uses Copilot"),
+    ),
+  },
+  Effect.fn("CLI.copilotEnable")(function* (flags) {
+    const path = yield* Path.Path;
+
+    const copilotHome = yield* Config.String("COPILOT_HOME").pipe(
+      Config.withDefault(path.join(home, ".copilot")),
+    );
+
+    const host: Host = {
+      platform: process.platform,
+      home,
+      uid: Option.fromUndefinedOr(process.getuid?.()),
+      copilotHome: expandPath(path, copilotHome),
+      shell: yield* Config.String("SHELL").pipe(Config.option),
+      zshDirectory: yield* Config.String("ZDOTDIR").pipe(Config.option),
+      configHome: yield* configHome,
+      appData: yield* Config.String("APPDATA").pipe(Config.option),
+      exporter: Option.map(
+        yield* Config.String("COPILOT_OTEL_FILE_EXPORTER_PATH").pipe(Config.option),
+        (file) => expandPath(path, file),
+      ),
+    };
+
+    // These outcomes are expected, so they are said plainly, without a failure's stack trace.
+    const stop = (message: string) =>
+      Console.error(message).pipe(
+        Effect.andThen(
+          Effect.sync(() => {
+            process.exitCode = 1;
+          }),
+        ),
+      );
+
+    // Neither flag asks for both, as does naming both.
+    const planned = yield* planEnabling(host, {
+      cli: flags.cli || !flags.vscode,
+      vscode: flags.vscode || !flags.cli,
+      allowRoot: flags.allowRoot,
+    }).pipe(Effect.result);
+
+    if (Result.isFailure(planned)) return yield* stop(planned.failure.message);
+
+    const { directory, steps } = planned.success;
+
+    const incomplete = (results: ReadonlyArray<Step>) => {
+      if (results.some(Step.$is("ByHand"))) process.exitCode = 2;
+    };
+
+    if (!steps.some(Step.$is("Change"))) {
+      yield* Console.log(
+        steps.some(Step.$is("ByHand"))
+          ? describeEnabling(steps)
+          : `Copilot's usage export is already on; nothing to change.\n\n${describeEnabling(steps)}`,
+      );
+
+      return incomplete(steps);
+    }
+
+    yield* Console.log(`${describeEnabling(steps)}\n`);
+
+    if (flags.dryRun) return incomplete(steps);
+
+    if (!flags.yes) {
+      if (!process.stdin.isTTY)
+        return yield* stop(
+          "Nothing was changed: there is no terminal to ask on. Run it again with --yes to make these changes.",
+        );
+
+      // Leaving the question with Ctrl-C declines it.
+      const agreed = yield* Prompt.run(
+        Prompt.Confirm({ message: "Make these changes?", initial: true }),
+      ).pipe(Effect.orElseSucceed(() => false));
+
+      if (!agreed) return yield* stop("Nothing was changed.");
+    }
+
+    const results = yield* enable(steps).pipe(Effect.result);
+
+    if (Result.isFailure(results)) return yield* stop(results.failure.message);
+
+    yield* Console.log(summarize(results.success, directory));
+
+    return incomplete(results.success);
+  }),
+).pipe(
+  Command.withDescription(
+    "Switch on Copilot's local usage export, after listing the changes and asking",
+  ),
+);
+
+const copilot = Command.make("copilot").pipe(
+  Command.withDescription("Set up Copilot CLI and VS Code Copilot Chat to record usage"),
+  Command.withSubcommands([copilotEnable]),
+);
+
 const example = Command.make("config-example", {}, () =>
   Console.log(
     JSON.stringify(
@@ -630,7 +754,7 @@ Command.make("token-ledger").pipe(
   Command.withDescription(
     "Local token accounting across coding agents. API estimates, not subscription bills.",
   ),
-  Command.withSubcommands([report, sync, login, schedule, example]),
+  Command.withSubcommands([report, sync, login, schedule, copilot, example]),
   Command.run({ version: metadata.version }),
   Effect.provide(Ledger.layer),
   Effect.provide(NodeServices.layer),
