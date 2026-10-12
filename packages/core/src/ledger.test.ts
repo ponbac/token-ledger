@@ -1122,6 +1122,112 @@ describe("Ledger sync payloads through the public interface", () => {
     }).pipe(Effect.provide(runtime)),
   );
 
+  it.effect("reaches back to the first usage found for a machine's first upload", () =>
+    Effect.gen(function* () {
+      const { write, lastModified, root } = yield* fixture();
+
+      const event = (timestamp: string, plan: string | null, input = 0) =>
+        JSON.stringify({
+          type: "event_msg",
+          timestamp,
+          payload: {
+            type: "token_count",
+            info:
+              input === 0 ? null : { last_token_usage: { input_tokens: input, output_tokens: 5 } },
+            rate_limits: { primary: { used_percent: 1 }, plan_type: plan },
+          },
+        });
+
+      // Last written months before the window, which an ordinary sync does not open.
+      const old = yield* write(
+        "codex/old.jsonl",
+        session("old", root, [
+          event("2026-06-15T09:00:00Z", "pro"),
+          event("2026-06-30T18:10:00Z", null, 10),
+        ]),
+      );
+
+      yield* lastModified(old, "2026-07-01T00:00:00Z");
+      yield* write(
+        "codex/new.jsonl",
+        session("new", root, [
+          event("2026-09-22T10:00:00Z", null, 20),
+          event("2026-09-23T12:00:00Z", null, 30),
+        ]),
+      );
+
+      const ledger = yield* Ledger;
+
+      const input = {
+        ...request([{ provider: "codex", path: `${root}/codex` }]),
+        since: "2026-09-22",
+        until: "2026-09-22",
+        timeZone: DateTime.zoneMakeNamedUnsafe("Europe/Stockholm"),
+      };
+
+      const window = yield* ledger.syncPayload(input, client);
+
+      assert.deepStrictEqual(
+        window.buckets.map((bucket) => bucket.hourStart),
+        ["2026-09-22T10:00:00.000Z"],
+      );
+
+      const history = yield* ledger.historyPayload(input, client);
+
+      // The earliest evidence is a plan hint; the window opens on its local day and ends as asked.
+      assert.strictEqual(history.since, "2026-06-15");
+      assert.deepStrictEqual(history.payload.window, {
+        start: "2026-06-14T22:00:00.000Z",
+        end: window.window.end,
+      });
+      assert.deepStrictEqual(
+        history.payload.buckets.map((bucket) => bucket.hourStart),
+        ["2026-06-30T18:00:00.000Z", "2026-09-22T10:00:00.000Z"],
+      );
+      assert.deepStrictEqual(
+        (history.payload.providerHints ?? []).map((hint) => hint.hourStart),
+        ["2026-06-15T09:00:00.000Z"],
+      );
+      assert.deepStrictEqual(
+        history.payload.coverage.map((entry) => [entry.files, entry.filesBeforeWindow]),
+        [[2, 0]],
+      );
+
+      // A zone off the hour: Kolkata's midnight is 18:30 UTC, and the window widens to 18:00.
+      const kolkata = yield* ledger.historyPayload(
+        { ...input, timeZone: DateTime.zoneMakeNamedUnsafe("Asia/Kolkata") },
+        client,
+      );
+
+      assert.strictEqual(kolkata.since, "2026-06-15");
+      assert.strictEqual(kolkata.payload.window.start, "2026-06-14T18:00:00.000Z");
+
+      // A timestamp from before any coding agent is a damaged record, not the start of history.
+      yield* write(
+        "codex/damaged.jsonl",
+        session("damaged", root, [
+          event("0001-01-01T00:00:00Z", null, 40),
+          event("1970-01-01T00:00:00Z", "pro", 50),
+        ]),
+      );
+
+      const undamaged = yield* ledger.historyPayload(input, client);
+
+      assert.strictEqual(undamaged.since, history.since);
+      assert.deepStrictEqual(undamaged.payload.window, history.payload.window);
+      assert.deepStrictEqual(undamaged.payload.buckets, history.payload.buckets);
+      assert.deepStrictEqual(undamaged.payload.providerHints, history.payload.providerHints);
+
+      // With nothing earlier on disk the window is the one asked for.
+      const recent = { ...input, since: "2026-06-01" };
+
+      assert.deepStrictEqual(yield* ledger.historyPayload(recent, client), {
+        payload: yield* ledger.syncPayload(recent, client),
+        since: "2026-06-01",
+      });
+    }).pipe(Effect.provide(runtime)),
+  );
+
   it.effect("reports each Codex plan once per hour in the window, excluding fork copies", () =>
     Effect.gen(function* () {
       const { write, root } = yield* fixture();

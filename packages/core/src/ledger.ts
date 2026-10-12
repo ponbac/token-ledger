@@ -1,5 +1,6 @@
 import {
   Context,
+  DateTime,
   Effect,
   FileSystem,
   Layer,
@@ -16,6 +17,7 @@ import {
 import { dayWindow } from "./calendar.ts";
 import {
   type Coverage,
+  type Day,
   ReportRequest,
   UsageReport,
   totalTokens,
@@ -52,10 +54,23 @@ import {
  */
 const modifiedSlack = 36 * 60 * 60 * 1000;
 
+/**
+ * No coding agent recorded usage before this, so an earlier timestamp is a damaged record. A
+ * history without a lower bound would otherwise open its window on such a record, decades or
+ * millennia back.
+ */
+const historyFloor = Date.UTC(2020, 0, 1);
+
 /** Invalid report windows or paths, with no provider payloads in the error. */
 export class InvalidRequest extends Schema.TaggedError<InvalidRequest>()("InvalidRequest", {
   message: Schema.String,
 }) {}
+
+/** A sync payload reaching back to the first usage found, and the local day it starts on. */
+export interface HistoryPayload {
+  readonly payload: SyncPayload;
+  readonly since: Day;
+}
 
 /** Produces complete or explicitly partial reports, hiding scanning and provider-specific accounting. */
 export class Ledger extends Context.Service<
@@ -67,6 +82,16 @@ export class Ledger extends Context.Service<
       request: ReportRequest,
       client: SyncClient,
     ) => Effect.Effect<SyncPayload, InvalidRequest>;
+    /**
+     * As `syncPayload`, with the window begun early enough to hold all usage found before
+     * `since` as well. `since` in the result is the local day the window then starts on. Meant
+     * for a machine's first upload: the server replaces the whole window, so sending it again
+     * after a provider has pruned its history would replace stored usage with less.
+     */
+    readonly historyPayload: (
+      request: ReportRequest,
+      client: SyncClient,
+    ) => Effect.Effect<HistoryPayload, InvalidRequest>;
   }
 >()("token-ledger/Ledger") {
   /** Filesystem implementation. All mutable aggregation and deduplication state belongs to a single call. */
@@ -350,9 +375,10 @@ export class Ledger extends Context.Service<
         });
       });
 
-      const syncPayload = Effect.fn("Ledger.syncPayload")(function* (
+      const payloadFrom = Effect.fn("Ledger.payloadFrom")(function* (
         input: ReportRequest,
         clientInput: SyncClient,
+        history: boolean,
       ) {
         const request = yield* decode(input);
 
@@ -366,24 +392,43 @@ export class Ledger extends Context.Service<
         );
 
         // Local midnights are not whole UTC hours in every zone; widen so hours are never split.
-        const window = hourRange(dayWindow(request.since, request.until, request.timeZone));
+        const requested = hourRange(dayWindow(request.since, request.until, request.timeZone));
+        // A history opens every file however old, and its window is settled afterwards.
+        const from = history ? Math.min(historyFloor, requested.start) : requested.start;
         const buckets = sessionBuckets(request.pricing);
         const hints = planHints();
+        let earliest = requested.start;
 
         const coverage = yield* scan(
           request,
-          window.start,
-          (timestamp) =>
-            timestamp >= window.start && timestamp < window.end ? timestamp : undefined,
-          (record, attribution) =>
-            buckets.add(record, attribution.shareable ? attribution.project : unattributed),
-          (plan) => hints.add(plan),
+          from,
+          (timestamp) => (timestamp >= from && timestamp < requested.end ? timestamp : undefined),
+          (record, attribution, timestamp) => {
+            earliest = Math.min(earliest, timestamp);
+            buckets.add(record, attribution.shareable ? attribution.project : unattributed);
+          },
+          (plan) => {
+            earliest = Math.min(earliest, plan.timestamp);
+            hints.add(plan);
+          },
         );
+
+        const since =
+          earliest < requested.start
+            ? DateTime.formatIsoDate(
+                DateTime.setZone(DateTime.makeUnsafe(earliest), request.timeZone),
+              )
+            : request.since;
+
+        const window =
+          since === request.since
+            ? requested
+            : hourRange(dayWindow(since, request.until, request.timeZone));
 
         const summary = providerCoverage(coverage);
         const replaced = replacedProviders(summary);
 
-        return yield* SyncPayload.makeEffect({
+        const payload = yield* SyncPayload.makeEffect({
           version: 1,
           machine: client.machine,
           clientVersion: client.version,
@@ -411,9 +456,16 @@ export class Ledger extends Context.Service<
               }),
           ),
         );
+
+        return { payload, since };
       });
 
-      return Ledger.of({ report, syncPayload });
+      return Ledger.of({
+        report,
+        syncPayload: (request, client) =>
+          Effect.map(payloadFrom(request, client, false), ({ payload }) => payload),
+        historyPayload: (request, client) => payloadFrom(request, client, true),
+      });
     }),
   );
 }

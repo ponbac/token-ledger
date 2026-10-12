@@ -493,6 +493,9 @@ Run it on **every machine** where you use a coding agent, and schedule it daily.
    machine ID and a label taken from the host name. Edit the label freely, but keep
    the ID: a new ID makes the same history count again as another machine.
 
+   A machine's first upload takes in all the history found on it, back to its earliest
+   usage, and says so. Every sync after that covers the last 14 days.
+
 If you map projects in a `token-ledger.json`, pass it with `--config`; scheduled jobs
 do not run in your project directory. Days follow the system time zone; add
 `--time-zone Europe/Stockholm` when a scheduler's environment may lack one.
@@ -661,7 +664,27 @@ See [the payload contract](docs/sync-v1.md) for every field.
 
 ### Windows and re-syncing
 
-The default window is the last 14 local days. For each provider whose history was
+The default window is the last 14 local days, except for a machine's first upload,
+which reaches back to the earliest usage found on it. Before scanning, and again just
+before sending, `sync` asks the server whether it has stored anything from this
+machine. Only when the server plainly answers that it has not is the whole history
+sent: a long window then has nothing to replace. If the server already lists the
+machine, the sync is an ordinary one, whatever the settings directory holds, so
+restored settings or a lost reply do not lead to a second whole-history upload. If the
+server cannot be asked, `sync` says so, sends the ordinary window, and leaves earlier
+history to `--since`. Two machines sharing one `machine.json` replace each other's
+usage on every sync, and a first upload is no exception.
+
+Passing `--since` chooses the window yourself, on a first upload as on any other.
+`sync --dry-run` asks the same question when it has a server and token, and shows the
+payload a real run would send; without them it shows the ordinary window and says why.
+If the server refuses a whole history as too large, `sync` uploads the last 14 days
+instead and says how to send the rest in parts. The first upload is the machine's, not
+each tool's: a tool left out of it with `--provider`, or whose history cannot be read
+then, is not sent in full later by itself. `sync` says so at the time; send that
+tool's earlier history afterwards with `--provider` and `--since`.
+
+For each provider whose history was
 fully read, the server replaces what this machine previously sent for that provider
 in the window, so repeated syncs never double count, and machines add up. Fully read
 means every file that could hold usage in the window: older transcripts are

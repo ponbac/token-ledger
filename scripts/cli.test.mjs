@@ -347,6 +347,281 @@ await test("sync uploads an identical payload on every run and exits 4 when refu
   }
 });
 
+await test("a machine's first sync uploads all its history, and only while the server holds nothing for it", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "token-ledger-first-"));
+  /** @type {string[]} */
+  const bodies = [];
+  /** @type {number[]} */
+  const refusals = [];
+  /** Machines the server has stored an upload from, as toki2 registers them. @type {Set<string>} */
+  const registered = new Set();
+  /** How the next questions are answered; the last entry answers every later one. @type {("list" | "error" | "redirect" | "partial")[]} */
+  let answers = ["list"];
+  let asked = 0;
+  const statuses = { list: 200, error: 500, partial: 206, redirect: 302 };
+
+  const server = createServer((request, response) => {
+    let body = "";
+    request.setEncoding("utf8");
+    request.on("data", (chunk) => {
+      body += chunk;
+    });
+    request.on("end", () => {
+      if (request.method === "GET" && request.url === "/elsewhere") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(
+          JSON.stringify({ staleAfterDays: 7, from: "2026-09-01", to: "2026-09-30", machines: [] }),
+        );
+
+        return;
+      }
+
+      if (request.method === "GET") {
+        const answer = answers[Math.min(asked, answers.length - 1)];
+
+        asked += 1;
+
+        if (answer === "redirect") {
+          response.writeHead(302, { location: "/elsewhere" });
+          response.end();
+
+          return;
+        }
+
+        response.writeHead(statuses[answer ?? "list"], { "content-type": "application/json" });
+        response.end(
+          JSON.stringify({
+            staleAfterDays: 7,
+            from: "2026-09-01",
+            to: "2026-09-30",
+            machines: [...registered].map((machineId) => ({ machineId })),
+          }),
+        );
+
+        return;
+      }
+
+      const status = refusals.shift() ?? 200;
+
+      bodies.push(body);
+
+      if (status === 200) registered.add(decodePayload(body).machine.id);
+
+      response.writeHead(status, { "content-type": "application/json" });
+      response.end(JSON.stringify(status === 200 ? { storedBuckets: 1 } : {}));
+    });
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(undefined)));
+
+  try {
+    const history = join(directory, "history.jsonl");
+
+    // Codex takes a token event equal to the one before it for a repeat, so the counts differ.
+    /** @param {string} timestamp @param {number} input */
+    const usage = (timestamp, input) =>
+      JSON.stringify({
+        type: "event_msg",
+        timestamp,
+        payload: {
+          type: "token_count",
+          info: { last_token_usage: { input_tokens: input, output_tokens: 20 } },
+        },
+      });
+
+    writeFileSync(
+      history,
+      [
+        JSON.stringify({ type: "session_meta", payload: { id: "fixture-session" } }),
+        JSON.stringify({ type: "turn_context", payload: { model: "fixture-model" } }),
+        usage("2026-03-05T12:00:00Z", 100),
+        usage("2026-09-22T12:00:00Z", 150),
+      ].join("\n") + "\n",
+    );
+
+    const configuration = join(directory, "token-ledger.json");
+
+    writeFileSync(
+      configuration,
+      JSON.stringify({ sources: [{ provider: "codex", path: history }] }),
+    );
+
+    /** @param {string} home @param {string[]} args @param {boolean} credentials @returns {Promise<{ status: number | null; stdout: string; stderr: string }>} */
+    const run = (home, args, credentials = true) =>
+      new Promise((resolve) => {
+        const { TOKEN_LEDGER_SERVER: _server, TOKI_API_TOKEN: _token, ...env } = process.env;
+
+        const settings = {
+          ...env,
+          HOME: directory,
+          XDG_CACHE_HOME: directory,
+          XDG_CONFIG_HOME: join(directory, home),
+        };
+
+        const child = spawn(
+          process.execPath,
+          [
+            join(packageDirectory, "dist/main.js"),
+            "sync",
+            "--config",
+            configuration,
+            "--offline",
+            "--until",
+            "2026-09-22",
+            "--time-zone",
+            "UTC",
+            ...args,
+          ],
+          {
+            cwd: directory,
+            env: credentials
+              ? {
+                  ...settings,
+                  TOKEN_LEDGER_SERVER: `http://127.0.0.1:${decodeAddress(server.address()).port}`,
+                  TOKI_API_TOKEN: "toki_fixture_secret",
+                }
+              : settings,
+          },
+        );
+
+        let stdout = "";
+        let stderr = "";
+        child.stdout.setEncoding("utf8").on("data", (chunk) => {
+          stdout += chunk;
+        });
+        child.stderr.setEncoding("utf8").on("data", (chunk) => {
+          stderr += chunk;
+        });
+        child.on("close", (code) => resolve({ status: code, stdout, stderr }));
+      });
+
+    /** @param {string | undefined} body */
+    const sent = (body) => {
+      const { window, buckets } = decodePayload(body ?? "");
+
+      return [window.start, window.end, buckets.map((bucket) => bucket.hourStart)];
+    };
+
+    const march = "2026-03-05T12:00:00.000Z";
+    const september = "2026-09-22T12:00:00.000Z";
+    const all = ["2026-03-05T00:00:00.000Z", "2026-09-23T00:00:00.000Z", [march, september]];
+    const fortnight = ["2026-09-09T00:00:00.000Z", "2026-09-23T00:00:00.000Z", [september]];
+
+    // With no server to ask, a dry run says so and shows the usual window.
+    const blind = await run("config", ["--dry-run"], false);
+
+    assert.equal(blind.status, 0, blind.stderr);
+    assert.match(blind.stderr, /No server and API token to ask/);
+    assert.deepEqual(sent(blind.stdout), fortnight);
+
+    // With one, it shows the whole history a first upload would send, and uploads nothing.
+    const preview = await run("config", ["--dry-run"]);
+
+    assert.equal(preview.status, 0, preview.stderr);
+    assert.deepEqual(sent(preview.stdout), all);
+    assert.equal(bodies.length, 0);
+
+    const first = await run("config", []);
+
+    assert.equal(first.status, 0, first.stderr);
+    assert.match(first.stderr, /First upload from this machine.*from 2026-03-05/);
+    assert.match(first.stdout, /2026-03-05 through 2026-09-22/);
+    assert.deepEqual(sent(bodies[0]), all);
+
+    // The server now lists the machine, whatever the settings directory remembers: restored
+    // settings, a lost acknowledgement, or another version of the CLI change nothing.
+    const second = await run("config", []);
+
+    assert.equal(second.status, 0, second.stderr);
+    assert.doesNotMatch(second.stderr, /First upload|Could not ask/);
+    assert.deepEqual(sent(bodies[1]), fortnight);
+
+    // The same settings pointed at a server that holds nothing get their history there too.
+    registered.clear();
+
+    const moved = await run("config", []);
+
+    assert.equal(moved.status, 0, moved.stderr);
+    assert.deepEqual(sent(bodies[2]), all);
+
+    // A reply that is not plainly the server's own list is no licence for a long window: an
+    // error, a partial response, and a redirect to something that answers with an empty list.
+    for (const [index, answer] of /** @type {const} */ ([
+      "error",
+      "partial",
+      "redirect",
+    ]).entries()) {
+      asked = 0;
+      answers = [answer];
+
+      const unanswered = await run(`unanswered-${answer}`, []);
+
+      assert.equal(unanswered.status, 0, unanswered.stderr);
+      assert.match(unanswered.stderr, /Could not ask the server.*--since/, answer);
+      assert.deepEqual(sent(bodies[3 + index]), fortnight, answer);
+    }
+
+    // An upload that arrives from this machine while its history is being scanned is not
+    // replaced: the server is asked again just before sending.
+    await run("overtaken", ["--dry-run"], false);
+
+    const overtaken = decodeMachine(
+      readFileSync(join(directory, "overtaken/token-ledger/machine.json"), "utf8"),
+    );
+
+    asked = 0;
+    answers = ["list", "list"];
+    registered.clear();
+
+    const asking = run("overtaken", []);
+
+    // Registered after the first question has certainly been answered, before the second.
+    while (asked < 1) await new Promise((resolve) => setTimeout(resolve, 5));
+
+    registered.add(overtaken.id);
+
+    const late = await asking;
+
+    assert.equal(late.status, 0, late.stderr);
+    assert.match(late.stderr, /has uploaded since it was asked about/);
+    assert.deepEqual(sent(bodies[6]), fortnight);
+
+    // A history the server refuses must not keep a machine from syncing at all.
+    refusals.push(413);
+
+    const refused = await run("large", []);
+
+    assert.equal(refused.status, 0, refused.stderr);
+    assert.match(refused.stderr, /rejected the upload \(413\).*--since and --until/);
+    assert.deepEqual(sent(bodies[7]), all);
+    assert.deepEqual(sent(bodies[8]), fortnight);
+
+    // A first upload narrowed to one tool says that the others are not sent in full later.
+    const narrowed = await run("narrowed", ["--provider", "codex", "--dry-run"]);
+
+    assert.equal(narrowed.status, 0, narrowed.stderr);
+    assert.match(narrowed.stderr, /Only codex is included.*--provider and --since/);
+    assert.deepEqual(sent(narrowed.stdout), all);
+
+    // An explicit --since is the window, on a first upload as on any other, with no question.
+    asked = 0;
+
+    const chosen = await run("chosen", ["--since", "2026-09-20"]);
+
+    assert.equal(chosen.status, 0, chosen.stderr);
+    assert.doesNotMatch(chosen.stderr, /First upload/);
+    assert.equal(asked, 0);
+    assert.deepEqual(sent(bodies[9]), [
+      "2026-09-20T00:00:00.000Z",
+      "2026-09-23T00:00:00.000Z",
+      [september],
+    ]);
+  } finally {
+    server.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 await test("login saves what a scheduled sync needs, and schedule install changes nothing without it", () => {
   const directory = mkdtempSync(join(tmpdir(), "token-ledger-schedule-"));
   const token = "toki_fixture_secret";

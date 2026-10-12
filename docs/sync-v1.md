@@ -161,7 +161,18 @@ fix; validation errors are `400`.
 A two-week window is typically a few hundred kilobytes, but a long `--since` window
 can reach several megabytes; Axum's default 2 MB body limit is too small.
 
-Because each sync replaces its window for every replaced provider, a window must not reach past the provider's
+A machine's first upload is the exception to the two-week window. Before scanning, and
+again before sending, the client calls `GET /ai-usage/machines` with the same token. When
+the answer is a 200 with the server's machine list and that list does not hold
+`machine.id`, the client extends the window backwards to the local day of the earliest
+usage it finds. The server registers a machine in the transaction that stores its first
+upload, so a machine it does not list has nothing a long window could replace. Any other
+answer, a redirect and an error included, counts as "listed": the client then sends an
+ordinary window. The two requests are not one transaction: uploads from two clients that
+share a machine ID and start at the same moment can still replace one another, as they do
+on every sync.
+
+Because each sync replaces its window for every replaced provider, a later window must not reach past the provider's
 local retention: Claude Code, for example, deletes transcripts after 30 days by
 default. Re-syncing a pruned window would replace good server data with less.
 

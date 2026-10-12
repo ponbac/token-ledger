@@ -1,6 +1,6 @@
 import { SyncPayload } from "@token-ledger/core/sync";
 import { Effect, Match, Option, Predicate, type Redacted, Schedule, Schema } from "effect";
-import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
+import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 
 /** The server was unreachable, too slow, or temporarily failing after retries; a later run may succeed. */
 export class SyncUnreachable extends Schema.TaggedError<SyncUnreachable>()("SyncUnreachable", {
@@ -26,6 +26,23 @@ export class SyncRejected extends Schema.TaggedError<SyncRejected>()("SyncReject
 }) {}
 
 const Acknowledgement = Schema.Struct({ storedBuckets: Schema.Natural });
+
+/** toki2's list of the caller's machines; the fields beside `machines` tell it from a stand-in. */
+const MachineList = Schema.Struct({
+  staleAfterDays: Schema.Number,
+  from: Schema.String,
+  to: Schema.String,
+  machines: Schema.Array(Schema.Struct({ machineId: Schema.String.check(Schema.isUUID()) })),
+});
+
+/** `path` under the server's base URL, whose own path may or may not end in a slash. */
+function endpoint(server: URL, path: string) {
+  const base = new URL(server);
+
+  base.pathname = base.pathname.endsWith("/") ? base.pathname : `${base.pathname}/`;
+
+  return new URL(path, base);
+}
 
 const VersionRejection = Schema.Struct({ supportedVersions: Schema.Array(Schema.Int) });
 
@@ -100,9 +117,7 @@ export const upload = Effect.fn("Sync.upload")(function* (
   payload: SyncPayload,
 ) {
   const client = (yield* HttpClient.HttpClient).pipe(HttpClient.withScope);
-  const base = new URL(server);
-  base.pathname = base.pathname.endsWith("/") ? base.pathname : `${base.pathname}/`;
-  const url = new URL(`ai-usage/machines/${payload.machine.id}/usage`, base);
+  const url = endpoint(server, `ai-usage/machines/${payload.machine.id}/usage`);
 
   const request = yield* HttpClientRequest.put(url).pipe(
     HttpClientRequest.bearerToken(token),
@@ -124,4 +139,49 @@ export const upload = Effect.fn("Sync.upload")(function* (
       times: 3,
     }),
   );
+});
+
+/**
+ * Whether the server has stored an upload from the machine `id`. The server registers a machine
+ * in the transaction that stores its first upload, so one it does not list has nothing a long
+ * window could replace.
+ *
+ * Fails with `SyncUnreachable` whenever the answer is not plainly the server's own: any status
+ * but 200, a redirect, or a document that is not its machine list. The caller must then assume
+ * the machine has uploaded.
+ */
+export const hasUploaded = Effect.fn("Sync.hasUploaded")(function* (
+  server: URL,
+  token: Redacted.Redacted<string>,
+  id: string,
+) {
+  const client = (yield* HttpClient.HttpClient).pipe(HttpClient.withScope);
+  const url = endpoint(server, "ai-usage/machines");
+
+  const unanswered = new SyncUnreachable({
+    message: `Could not ask ${url.origin} whether this machine has uploaded before.`,
+  });
+
+  return yield* client
+    .execute(
+      HttpClientRequest.get(url).pipe(
+        HttpClientRequest.bearerToken(token),
+        HttpClientRequest.acceptJson,
+      ),
+    )
+    .pipe(
+      Effect.filterOrFail(
+        (response) => response.status === 200,
+        () => unanswered,
+      ),
+      Effect.flatMap(HttpClientResponse.schemaBodyJson(MachineList)),
+      Effect.map(({ machines }) =>
+        machines.some((machine) => machine.machineId.toLowerCase() === id.toLowerCase()),
+      ),
+      Effect.scoped,
+      Effect.timeout("20 seconds"),
+      // Another host's answer says nothing about what this server holds.
+      Effect.provideService(FetchHttpClient.RequestInit, { redirect: "error" }),
+      Effect.mapError(() => unanswered),
+    );
 });

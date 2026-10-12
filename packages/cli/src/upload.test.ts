@@ -9,7 +9,7 @@ import {
   HttpClientResponse,
 } from "effect/http";
 
-import { upload } from "./upload.ts";
+import { hasUploaded, upload } from "./upload.ts";
 
 const payload = SyncPayload.make({
   version: 1,
@@ -44,6 +44,71 @@ function server(respond: (request: HttpClientRequest.HttpClientRequest) => Respo
 
   return { client, requests };
 }
+
+describe("hasUploaded", () => {
+  const id = "5f0c5a1e-3b8e-4d8e-9a57-0d7b1c1f2e3a";
+  const other = "0b0b0b0b-0000-4000-8000-000000000000";
+
+  const list = (machines: ReadonlyArray<string>) => ({
+    staleAfterDays: 7,
+    from: "2026-09-01",
+    to: "2026-09-30",
+    machines: machines.map((machineId) => ({ machineId, label: "a machine" })),
+  });
+
+  it.effect("asks the server for the caller's machines and looks for this one", () =>
+    Effect.gen(function* () {
+      const known = server(() => Response.json(list([other, id.toUpperCase()])));
+
+      const listed = yield* hasUploaded(new URL("https://toki.example/api"), token, id).pipe(
+        Effect.provideService(HttpClient.HttpClient, known.client),
+      );
+
+      assert.isTrue(listed);
+      assert.strictEqual(known.requests[0]?.method, "GET");
+      assert.strictEqual(known.requests[0]?.url, "https://toki.example/api/ai-usage/machines");
+      assert.strictEqual(known.requests[0]?.headers["authorization"], "Bearer toki_fixture");
+
+      for (const machines of [[], [other]]) {
+        const unknown = yield* hasUploaded(new URL("https://toki.example/api/"), token, id).pipe(
+          Effect.provideService(
+            HttpClient.HttpClient,
+            server(() => Response.json(list(machines))).client,
+          ),
+        );
+
+        assert.isFalse(unknown);
+      }
+    }),
+  );
+
+  it.effect("fails rather than answer when the reply is not plainly the server's list", () =>
+    Effect.gen(function* () {
+      // Refused, missing on an older server, broken, partial, a stand-in's empty list, a list
+      // whose entries are not machine IDs, another document, not JSON, and unreachable.
+      for (const respond of [
+        () => new Response(null, { status: 401 }),
+        () => new Response(null, { status: 404 }),
+        () => new Response(null, { status: 500 }),
+        () => Response.json(list([]), { status: 206 }),
+        () => Response.json({ machines: [] }),
+        () => Response.json(list(["not-a-uuid"])),
+        () => Response.json({ ...list([]), machines: "none" }),
+        () => new Response("<html>", { status: 200 }),
+        () => null,
+      ]) {
+        const outcome = yield* hasUploaded(new URL("https://toki.example"), token, id).pipe(
+          Effect.provideService(HttpClient.HttpClient, server(respond).client),
+          Effect.result,
+        );
+
+        assert.isTrue(
+          Result.isFailure(outcome) && Predicate.isTagged(outcome.failure, "SyncUnreachable"),
+        );
+      }
+    }),
+  );
+});
 
 describe("upload", () => {
   it.effect("PUTs the payload under the server's path with the bearer token", () =>
