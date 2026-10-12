@@ -242,12 +242,13 @@ interface Startup {
   readonly file: string;
   readonly line: string;
   readonly satisfies: (line: string) => boolean;
-  /** A file read after `file`, where a line setting the variable would override this one. */
-  readonly later: Option.Option<string>;
+  /** Other files the shell reads at startup, where the person may set the variable themselves. */
+  readonly others: ReadonlyArray<string>;
 }
 
 /** Steps that make new bash, zsh, or fish terminals export the variable as `target`. */
 const startupSteps = Effect.fn("Copilot.startupSteps")(function* (host: Host, target: string) {
+  const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
 
   const shell = Option.match(host.shell, {
@@ -261,7 +262,7 @@ const startupSteps = Effect.fn("Copilot.startupSteps")(function* (host: Host, ta
     file,
     line: exported,
     satisfies: exportsTo(target, host.home),
-    later: Option.none(),
+    others: [],
   });
 
   const startup = yield* Match.value(shell).pipe(
@@ -286,14 +287,30 @@ const startupSteps = Effect.fn("Copilot.startupSteps")(function* (host: Host, ta
 
       const line = `set -gx ${variable} ${homeWord(path, host, target, fishWord)}`;
 
-      // A file of its own in conf.d, which fish reads before config.fish.
-      return Effect.succeed(
-        Option.some<Startup>({
-          file: path.join(directory, "conf.d", "token-ledger-copilot.fish"),
-          line,
-          satisfies: (text) => text.trim() === line,
-          later: Option.some(path.join(directory, "config.fish")),
-        }),
+      const snippets = path.join(directory, "conf.d");
+      const file = path.join(snippets, "token-ledger-copilot.fish");
+
+      // A file of its own in conf.d. Fish reads those in name order and then config.fish, so
+      // the person's own line in any of them either overrides this one or is overridden by it.
+      return fs.readDirectory(snippets).pipe(
+        Effect.orElseSucceed((): ReadonlyArray<string> => []),
+        Effect.map((names) =>
+          Option.some<Startup>({
+            file,
+            line,
+            satisfies: (text) => text.trim() === line,
+            others: [
+              ...names
+                .toSorted((a, b) => a.localeCompare(b))
+                .flatMap((name) =>
+                  name.endsWith(".fish") && path.join(snippets, name) !== file
+                    ? [path.join(snippets, name)]
+                    : [],
+                ),
+              path.join(directory, "config.fish"),
+            ],
+          }),
+        ),
       );
     }),
     Match.orElse(() => Effect.succeed(Option.none<Startup>())),
@@ -311,7 +328,7 @@ const startupSteps = Effect.fn("Copilot.startupSteps")(function* (host: Host, ta
       }),
     ];
 
-  const { file, line, satisfies, later } = startup.value;
+  const { file, line, satisfies, others } = startup.value;
   const byHand = `Add this line to ${file}:\n${indented(line, 4)}`;
 
   const conflict = (where: string, found: string) =>
@@ -323,23 +340,23 @@ const startupSteps = Effect.fn("Copilot.startupSteps")(function* (host: Host, ta
 
   const read = yield* Effect.all([
     readOptional(file),
-    Option.match(later, {
-      onNone: () => Effect.succeed(Option.none<string>()),
-      onSome: readOptional,
-    }),
+    Effect.forEach(others, (other) =>
+      Effect.map(readOptional(other), (text) => ({
+        other,
+        found: Option.getOrElse(text, () => "")
+          .split("\n")
+          .find((entry) => !/^\s*#/.test(entry) && entry.includes(variable)),
+      })),
+    ),
   ]).pipe(Effect.option);
 
   if (Option.isNone(read))
     return [Step.ByHand({ part: "cli", reason: `Cannot read ${file}.`, instructions: byHand })];
 
-  const [original, overriding] = read.value;
+  const [original, mentions] = read.value;
 
-  const override = Option.getOrElse(overriding, () => "")
-    .split("\n")
-    .find((text) => !/^\s*#/.test(text) && text.includes(variable));
-
-  if (override !== undefined && Option.isSome(later))
-    return [conflict(`${later.value} already sets ${variable}`, override.trim())];
+  for (const { other, found } of mentions)
+    if (found !== undefined) return [conflict(`${other} already sets ${variable}`, found.trim())];
 
   const existing = Option.getOrElse(original, () => "");
 

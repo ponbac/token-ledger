@@ -319,12 +319,22 @@ suite("copilot enable on macOS and Linux", () => {
         `${marker}\nset -gx COPILOT_OTEL_FILE_EXPORTER_PATH "$HOME/.copilot/otel/usage.jsonl"\nalias ll "ls -la"\n`,
       );
 
-      // config.fish runs later, so a line there would win and is the person's to change.
-      yield* fs.writeFileString(
-        path.join(fish.home, "config/fish/config.fish"),
-        "set -gx COPILOT_OTEL_FILE_EXPORTER_PATH /logs/copilot.jsonl\n",
-      );
-      assert.deepStrictEqual(tags((yield* plan(fish.host, cli)).steps), ["cli:ByHand"]);
+      // Fish reads the other conf.d files and config.fish too, so the person's own line in
+      // one of them would win or be overridden; either way it is theirs to change.
+      for (const own of ["config/fish/config.fish", "config/fish/conf.d/zzz-local.fish"]) {
+        const file = path.join(fish.home, own);
+
+        yield* fs.writeFileString(
+          file,
+          "set -gx COPILOT_OTEL_FILE_EXPORTER_PATH /logs/copilot.jsonl\n",
+        );
+
+        const { steps } = yield* plan(fish.host, cli);
+
+        assert.deepStrictEqual(tags(steps), ["cli:ByHand"], own);
+        assert.include(describe(steps), `${file} already sets`);
+        yield* fs.remove(file);
+      }
     }).pipe(
       Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, noPrograms),
       Effect.provide(NodeServices.layer),
