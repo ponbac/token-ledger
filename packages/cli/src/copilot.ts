@@ -515,7 +515,7 @@ const settingsSteps = Effect.fn("Copilot.settingsSteps")(function* (host: Host, 
       ...(lines.length === 0
         ? []
         : [
-            `In VS Code, run "Preferences: Open User Settings (JSON)" from the Command Palette. Give each of these settings the value shown: change its line if the setting is already there, and paste the others on a new line right after the opening {\n${indented(
+            `In VS Code, run "Preferences: Open User Settings (JSON)" from the Command Palette; in a profile other than the default, run "Preferences: Open Application Settings (JSON)" instead, where settings shared by all profiles are kept. Give each of these settings the value shown: change its line if the setting is already there, and paste the others on a new line right after the opening {\n${indented(
               lines.map((line) => `${line},`).join("\n"),
               4,
             )}`,

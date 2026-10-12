@@ -222,8 +222,10 @@ cache-token attributes are accepted. See the [Copilot CLI reference](https://doc
 ### VS Code Copilot Chat
 
 In VS Code's user settings (**Preferences: Open User Settings (JSON)**), enable local
-file export. The settings are application-wide, so they belong in the default profile's
-`settings.json` and apply to every profile:
+file export. The settings are application-wide: they are kept in the default profile's
+`settings.json` and apply to every profile. In a profile other than the default, that
+command opens the profile's own file, so run **Preferences: Open Application Settings
+(JSON)** there instead:
 
 ```json
 {
