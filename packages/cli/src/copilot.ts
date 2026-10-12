@@ -671,6 +671,17 @@ export const plan = Effect.fn("Copilot.plan")(function* (host: Host, wanted: Ena
     ...(wanted.cli ? [target] : []),
     ...(wanted.vscode ? builds.map((build) => path.join(directory, build.file)) : []),
   ]) {
+    // An export's name taken by a folder, as `mkdir -p` on the whole path leaves it.
+    const folder = yield* fs.stat(entry).pipe(
+      Effect.map((info) => entry !== directory && info.type === "Directory"),
+      Effect.orElseSucceed(() => false),
+    );
+
+    if (folder)
+      return yield* new CopilotError({
+        message: `${entry} is a folder, so Copilot cannot write its export to that name. Move it away, then run this again.`,
+      });
+
     const locked = yield* fs.access(entry, { writable: true }).pipe(
       Effect.as(false),
       Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(false)),

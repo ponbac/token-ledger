@@ -600,6 +600,20 @@ suite("copilot enable on macOS and Linux", () => {
         "cli:Change",
       ]);
       assert.isTrue(Result.isFailure(yield* plan(owned.host, both).pipe(Effect.result)));
+
+      // Nor can an export be written where a folder has taken its name.
+      const named = yield* machine("linux", "/bin/zsh");
+
+      yield* fs.makeDirectory(path.join(named.home, ".copilot", "otel", "usage.jsonl"), {
+        recursive: true,
+      });
+
+      const taken = yield* plan(named.host, both).pipe(Effect.result);
+
+      assert.match(
+        Result.isFailure(taken) ? taken.failure.message : "",
+        /usage\.jsonl is a folder/,
+      );
     }).pipe(
       Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, noPrograms),
       Effect.provide(NodeServices.layer),
