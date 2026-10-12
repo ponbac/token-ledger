@@ -10,6 +10,9 @@ import {
 /** A top-level property to set: its key and a scalar value. */
 export type Property = readonly [key: string, value: boolean | string];
 
+/** A top-level list property that must contain `item`, whatever else it holds. */
+export type Membership = readonly [key: string, item: string];
+
 /** A property that had to be written, with the source text of the value it replaced. */
 export interface Changed {
   readonly key: string;
@@ -18,10 +21,12 @@ export interface Changed {
   readonly previous: Option.Option<string>;
 }
 
-/** An edited document and what was changed in it; `changes` is empty when nothing was. */
+/** An edited document and what was changed in it; both lists are empty when nothing was. */
 export interface Edited {
   readonly text: string;
   readonly changes: ReadonlyArray<Changed>;
+  /** The memberships whose item had to be added. */
+  readonly included: ReadonlyArray<Membership>;
 }
 
 /** Replaces `length` characters at `offset` with `text`; a zero `length` inserts. */
@@ -184,23 +189,54 @@ const holds = (root: Node, properties: ReadonlyArray<Property>) =>
     return found.length === 1 && found.every((member) => getNodeValue(member.value) === value);
   });
 
+/** The items of the list `key` names in `root` as JSON; `None` unless it is there once, as a list. */
+function listed(root: Node, key: string): Option.Option<ReadonlyArray<string>> {
+  const found = members(root).filter((member) => member.key.value === key);
+  const [member] = found;
+
+  return found.length === 1 && member?.value.type === "array"
+    ? Option.some((member.value.children ?? []).map((item) => JSON.stringify(getNodeValue(item))))
+    : Option.none();
+}
+
+/**
+ * Whether each list in `result` is what `root` had with the item added when it was missing:
+ * nothing a list already held is lost or reordered.
+ */
+const includes = (result: Node, root: Node, memberships: ReadonlyArray<Membership>) =>
+  memberships.every(([key, item]) => {
+    const before = Option.getOrElse(listed(root, key), (): ReadonlyArray<string> => []);
+
+    const wanted = before.includes(JSON.stringify(item))
+      ? before
+      : [...before, JSON.stringify(item)];
+
+    return Option.getOrElse(listed(result, key), () => []).join("\n") === wanted.join("\n");
+  });
+
 /**
  * Sets top-level properties of the object in the JSONC `source`. A property that is present has
- * only its value replaced; absent ones are added after the last property. Every other character
- * stays as it was, including comments, trailing commas, indentation, and line endings. A
- * document with no value becomes an object.
+ * only its value replaced; absent ones are added after the last property. A list named in
+ * `memberships` gains its item after the ones it holds, or is added holding only that item.
+ * Every other character stays as it was, including comments, trailing commas, indentation, and
+ * line endings. A document with no value becomes an object.
  *
- * `None` when `source` has a syntax error, its root is not an object, or it repeats one of the
- * keys, where an edit could not be trusted to set the value an editor reads.
+ * `None` when `source` has a syntax error, its root is not an object, it repeats one of the
+ * keys, or a membership's property is not a list, where an edit could not be trusted to set the
+ * value an editor reads.
  */
 export function setProperties(
   source: string,
   properties: ReadonlyArray<Property>,
+  memberships: ReadonlyArray<Membership> = [],
 ): Option.Option<Edited> {
-  const mark = source.startsWith("﻿") ? "﻿" : "";
+  const mark = source.startsWith("\uFEFF") ? "\uFEFF" : "";
   const text = source.slice(mark.length);
-  const keys = new Set(properties.map(([key]) => key));
+  const keys = new Set([...properties, ...memberships].map(([key]) => key));
   const rendered = ([key, value]: Property) => `${JSON.stringify(key)}: ${JSON.stringify(value)}`;
+
+  const holding = ([key, item]: Membership) => `${JSON.stringify(key)}: [${JSON.stringify(item)}]`;
+
   const parsed = parse(text);
 
   if (Option.isNone(parsed)) return Option.none();
@@ -208,7 +244,10 @@ export function setProperties(
   if (Option.isNone(parsed.value.root)) {
     const eol = text.includes("\r\n") ? "\r\n" : "\n";
     const lead = text === "" || text.endsWith("\n") ? text : `${text}${eol}`;
-    const body = properties.map((property) => `${defaultIndent}${rendered(property)}`);
+
+    const body = [...properties.map(rendered), ...memberships.map(holding)].map(
+      (line) => `${defaultIndent}${line}`,
+    );
 
     return Option.some({
       text: `${mark}${lead}{${eol}${body.join(`,${eol}`)}${eol}}${eol}`,
@@ -217,6 +256,7 @@ export function setProperties(
         value: JSON.stringify(value),
         previous: Option.none(),
       })),
+      included: memberships,
     });
   }
 
@@ -226,7 +266,8 @@ export function setProperties(
 
   const changes: Changed[] = [];
   const splices: Splice[] = [];
-  const missing: Property[] = [];
+  const included: Membership[] = [];
+  const missing: string[] = [];
 
   for (const property of properties) {
     const [key, value] = property;
@@ -245,7 +286,7 @@ export function setProperties(
       ),
     });
 
-    if (member === undefined) missing.push(property);
+    if (member === undefined) missing.push(rendered(property));
     else
       splices.push({
         offset: member.value.offset,
@@ -254,8 +295,33 @@ export function setProperties(
       });
   }
 
-  if (missing.length > 0)
-    splices.push(...additions(text, parsed.value, root, missing.map(rendered)));
+  for (const membership of memberships) {
+    const [key, item] = membership;
+    const found = members(root).filter((member) => member.key.value === key);
+    const [member] = found;
+
+    if (found.length > 1 || (member !== undefined && member.value.type !== "array"))
+      return Option.none();
+
+    const items = member?.value.children ?? [];
+
+    if (items.some((node) => getNodeValue(node) === item)) continue;
+
+    included.push(membership);
+
+    const last = items.at(-1);
+
+    // After the last item, ahead of any trailing comma or comment; an empty list is filled.
+    if (member === undefined) missing.push(holding(membership));
+    else
+      splices.push(
+        last === undefined
+          ? { offset: member.value.offset + 1, length: 0, text: JSON.stringify(item) }
+          : { offset: last.offset + last.length, length: 0, text: `, ${JSON.stringify(item)}` },
+      );
+  }
+
+  if (missing.length > 0) splices.push(...additions(text, parsed.value, root, missing));
 
   const edited = spliced(text, splices);
 
@@ -266,8 +332,9 @@ export function setProperties(
       onSome: (object) =>
         object.type === "object" &&
         holds(object, properties) &&
+        includes(object, root, memberships) &&
         others(object, keys) === others(root, keys)
-          ? Option.some({ text: `${mark}${edited}`, changes })
+          ? Option.some({ text: `${mark}${edited}`, changes, included })
           : Option.none(),
     }),
   );

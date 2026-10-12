@@ -229,6 +229,7 @@ suite("copilot enable on macOS and Linux", () => {
         `"github.copilot.chat.otel.exporterType": "file" (now "otlp-http")`,
       );
       assert.include(describe(steps), exported);
+      assert.include(describe(steps), "so that Settings Sync does not copy this machine's path");
       assert.isFalse(yield* fs.exists(directory));
 
       const results = yield* perform(steps);
@@ -252,6 +253,7 @@ suite("copilot enable on macOS and Linux", () => {
     "github.copilot.chat.otel.enabled": true,
     "github.copilot.chat.otel.outfile": "${outfile}",
     "github.copilot.chat.otel.captureContent": false,
+    "settingsSync.ignoredSettings": ["github.copilot.chat.otel.outfile"],
 }
 `,
       );

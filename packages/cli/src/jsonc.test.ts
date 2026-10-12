@@ -114,6 +114,33 @@ suite("setProperties", () => {
     assert.strictEqual(edit("// only a comment"), `// only a comment\n${filled}\n`);
   });
 
+  it("adds an item to a list without disturbing what the list holds", () => {
+    const include = (source: string) =>
+      Option.match(setProperties(source, [], [["sync.ignored", "otel.outfile"]]), {
+        onNone: () => "refused",
+        onSome: ({ text }) => text,
+      });
+
+    assert.strictEqual(include("{}"), '{\n    "sync.ignored": ["otel.outfile"]\n}');
+    assert.strictEqual(include('{ "sync.ignored": [] }'), '{ "sync.ignored": ["otel.outfile"] }');
+    assert.strictEqual(
+      include('{\n  "sync.ignored": [\n    "editor.fontSize", // per screen\n  ],\n  "a": 1\n}\n'),
+      '{\n  "sync.ignored": [\n    "editor.fontSize", "otel.outfile", // per screen\n  ],\n  "a": 1\n}\n',
+    );
+
+    // Already there, wherever it stands: nothing to write.
+    const listed = '{ "sync.ignored": ["otel.outfile", "editor.fontSize"] }';
+
+    assert.strictEqual(include(listed), listed);
+    assert.deepStrictEqual(
+      Option.getOrThrow(setProperties(listed, [], [["sync.ignored", "otel.outfile"]])).included,
+      [],
+    );
+
+    // A value that is not a list is not this command's to reshape.
+    assert.strictEqual(include('{ "sync.ignored": "otel.outfile" }'), "refused");
+  });
+
   it("refuses a file it cannot edit safely", () => {
     // A syntax error, a root that is not an object, and a key VS Code would read twice.
     for (const source of [

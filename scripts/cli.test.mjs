@@ -484,7 +484,7 @@ await test("copilot enable sets the export up once, and reports then read both e
 
     assert.equal(
       edited,
-      `{\n  // appearance\n  "workbench.colorTheme": "Dark", // the good one\n  "editor.rulers": [80, 120,],\n  "github.copilot.chat.otel.enabled": true,\n  "github.copilot.chat.otel.exporterType": "file",\n  "github.copilot.chat.otel.outfile": ${JSON.stringify(outfile)},\n  "github.copilot.chat.otel.captureContent": false,\n}\n`,
+      `{\n  // appearance\n  "workbench.colorTheme": "Dark", // the good one\n  "editor.rulers": [80, 120,],\n  "github.copilot.chat.otel.enabled": true,\n  "github.copilot.chat.otel.exporterType": "file",\n  "github.copilot.chat.otel.outfile": ${JSON.stringify(outfile)},\n  "github.copilot.chat.otel.captureContent": false,\n  "settingsSync.ignoredSettings": ["github.copilot.chat.otel.outfile"],\n}\n`,
     );
 
     const startup = join(directory, ".zshrc");

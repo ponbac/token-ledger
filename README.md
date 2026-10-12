@@ -130,8 +130,11 @@ It lists the changes it is about to make and asks before making them:
   `~/.config/fish/conf.d/token-ledger-copilot.fish`.
 - **VS Code Copilot Chat** (`--vscode`): it sets the four `github.copilot.chat.otel.*`
   settings shown [below](#vs-code-copilot-chat) in the user `settings.json`, with this
-  machine's path to `vscode-chat.jsonl` in the same folder. Comments, trailing commas,
-  and every other setting stay exactly as they were.
+  machine's path to `vscode-chat.jsonl` in the same folder. It also adds
+  `github.copilot.chat.otel.outfile` to the `settingsSync.ignoredSettings` list, because
+  Settings Sync would otherwise copy this machine's path to your other machines, where
+  it names nothing. Comments, trailing commas, and every other setting stay exactly as
+  they were.
 
 | Platform | VS Code user settings                                                               |
 | -------- | ----------------------------------------------------------------------------------- |
@@ -235,6 +238,13 @@ Replace the output path with an absolute path on your machine, create its parent
 directory, reload VS Code, and start a new chat. On Windows, use a path such as
 `C:/Users/you/.copilot/otel/vscode-chat.jsonl`. See the
 [VS Code monitoring documentation](https://code.visualstudio.com/docs/agents/guides/monitoring-agents).
+
+If you use Settings Sync on machines whose home directories differ, also add
+`"github.copilot.chat.otel.outfile"` to the `settingsSync.ignoredSettings` list: the
+path is synced like any other user setting, and the last machine to set it would
+otherwise send the others' export to a path that does not exist there. Where your
+organization manages Copilot's telemetry settings by policy, the policy overrides these
+user settings, and the export follows it.
 
 `captureContent: false` asks VS Code to leave prompts and responses out of the export,
 but do not count on the local file being free of them: an

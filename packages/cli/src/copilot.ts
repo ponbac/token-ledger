@@ -1,7 +1,7 @@
 import { Data, Effect, FileSystem, Match, Option, Path, Schema } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
-import { type Property, setProperties } from "./jsonc.ts";
+import { type Membership, type Property, setProperties } from "./jsonc.ts";
 import { posixWord, powershellArguments, powershellString } from "./schedule.ts";
 
 /** Copilot's export cannot be enabled at all; partial failures are `ByHand` steps instead. */
@@ -498,16 +498,35 @@ const settingsSteps = Effect.fn("Copilot.settingsSteps")(function* (host: Host, 
     ["github.copilot.chat.otel.captureContent", false],
   ];
 
+  // The path belongs to this machine. Settings Sync would copy it to the person's other
+  // machines, where it names nothing, so VS Code is told to leave that one setting out.
+  const unsynced: ReadonlyArray<Membership> = [
+    ["settingsSync.ignoredSettings", "github.copilot.chat.otel.outfile"],
+  ];
+
+  const unsyncing = unsynced.map(
+    ([key, item]) =>
+      `add ${JSON.stringify(item)} to the ${JSON.stringify(key)} list, so that Settings Sync does not copy this machine's path to your other machines`,
+  );
+
   // Every line ends with a comma, which is valid whether or not other settings follow.
-  const byHand = (lines: ReadonlyArray<string>) =>
-    `In VS Code, run "Preferences: Open User Settings (JSON)" from the Command Palette. Give each of these settings the value shown: change its line if the setting is already there, and paste the others on a new line right after the opening {\n${indented(
-      lines.map((line) => `${line},`).join("\n"),
-      4,
-    )}`;
+  const byHand = (lines: ReadonlyArray<string>, lists: ReadonlyArray<string>) =>
+    [
+      ...(lines.length === 0
+        ? []
+        : [
+            `In VS Code, run "Preferences: Open User Settings (JSON)" from the Command Palette. Give each of these settings the value shown: change its line if the setting is already there, and paste the others on a new line right after the opening {\n${indented(
+              lines.map((line) => `${line},`).join("\n"),
+              4,
+            )}`,
+          ]),
+      ...lists.map((list) => `In the same file, ${list}.`),
+    ].join("\n");
 
   const every = (file: string) =>
     byHand(
       properties(file).map(([key, value]) => `${JSON.stringify(key)}: ${JSON.stringify(value)}`),
+      unsyncing,
     );
 
   const steps: Step[] = [];
@@ -536,30 +555,35 @@ const settingsSteps = Effect.fn("Copilot.settingsSteps")(function* (host: Host, 
         setProperties(
           Option.getOrElse(original.value, () => ""),
           properties(build.file),
+          unsynced,
         ),
         {
           onNone: () =>
             Step.ByHand({
               part: "vscode",
-              reason: `${file} has a syntax error or repeats one of these settings, so it was left alone.`,
+              reason: `${file} has a syntax error, repeats one of these settings, or holds one in a form this command does not expect, so it was left alone.`,
               instructions: `Repair it first: VS Code marks what is wrong, and a repeated setting should be there once. Then run this command again, or finish by hand.\n${every(build.file)}`,
             }),
-          onSome: ({ text, changes }) =>
-            changes.length === 0
+          onSome: ({ text, changes, included }) =>
+            changes.length === 0 && included.length === 0
               ? Step.Kept({ part: "vscode", summary: `${file} already has the export settings.` })
               : Step.Change({
                   part: "vscode",
                   summary: `${Option.isSome(original.value) ? "edit" : "create"} ${file}`,
-                  detail: changes.map(
-                    ({ key, value, previous }) =>
-                      `${JSON.stringify(key)}: ${value}${Option.match(previous, {
-                        onNone: () => "",
-                        onSome: (was) => ` (now ${was})`,
-                      })}`,
-                  ),
+                  detail: [
+                    ...changes.map(
+                      ({ key, value, previous }) =>
+                        `${JSON.stringify(key)}: ${value}${Option.match(previous, {
+                          onNone: () => "",
+                          onSome: (was) => ` (now ${was})`,
+                        })}`,
+                    ),
+                    ...(included.length === 0 ? [] : unsyncing),
+                  ],
                   action: Action.Write({ file, contents: text, original: original.value }),
                   byHand: byHand(
                     changes.map(({ key, value }) => `${JSON.stringify(key)}: ${value}`),
+                    included.length === 0 ? [] : unsyncing,
                   ),
                 }),
         },
