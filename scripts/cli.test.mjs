@@ -596,6 +596,13 @@ await test("a machine's first sync uploads all its history, and only while the s
     assert.deepEqual(sent(bodies[7]), all);
     assert.deepEqual(sent(bodies[8]), fortnight);
 
+    // A first upload narrowed to one tool says that the others are not sent in full later.
+    const narrowed = await run("narrowed", ["--provider", "codex", "--dry-run"]);
+
+    assert.equal(narrowed.status, 0, narrowed.stderr);
+    assert.match(narrowed.stderr, /Only codex is included.*--provider and --since/);
+    assert.deepEqual(sent(narrowed.stdout), all);
+
     // An explicit --since is the window, on a first upload as on any other, with no question.
     asked = 0;
 

@@ -679,9 +679,10 @@ Passing `--since` chooses the window yourself, on a first upload as on any other
 `sync --dry-run` asks the same question when it has a server and token, and shows the
 payload a real run would send; without them it shows the ordinary window and says why.
 If the server refuses a whole history as too large, `sync` uploads the last 14 days
-instead and says how to send the rest in parts. A tool whose history cannot be read
-during the first upload is left out, as always; send its earlier history afterwards
-with `--provider` and `--since`.
+instead and says how to send the rest in parts. The first upload is the machine's, not
+each tool's: a tool left out of it with `--provider`, or whose history cannot be read
+then, is not sent in full later by itself. `sync` says so at the time; send that
+tool's earlier history afterwards with `--provider` and `--since`.
 
 For each provider whose history was
 fully read, the server replaces what this machine previously sent for that provider

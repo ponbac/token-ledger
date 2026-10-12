@@ -417,7 +417,11 @@ const sync = Command.make(
 
     if (whole)
       yield* Console.error(
-        `First upload from this machine: taking in all the history found, from ${first.since}. Later syncs cover the last 14 days.`,
+        `First upload from this machine: taking in all the history found, from ${first.since}. Later syncs cover the last 14 days.${
+          flags.provider === "all"
+            ? ""
+            : ` Only ${flags.provider} is included; the other tools' earlier history is not sent later by itself, so send it with --provider and --since.`
+        }`,
       );
 
     /** Reports what could not be read, and says whether the payload falls short of --strict. */
