@@ -203,10 +203,13 @@ suite("launchd agent", () => {
       );
       assert.match(contents, /<key>Hour<\/key>\s*<integer>7<\/integer>/);
       assert.match(contents, /<key>Minute<\/key>\s*<integer>5<\/integer>/);
-      assert.deepStrictEqual(lines, [
-        "launchctl bootout gui/501/com.github.ponbac.token-ledger.sync",
-        `launchctl bootstrap gui/501 ${plist}`,
-      ]);
+      assert.deepStrictEqual(
+        lines.map((line) => line.replaceAll("\\", "/")),
+        [
+          "launchctl bootout gui/501/com.github.ponbac.token-ledger.sync",
+          `launchctl bootstrap gui/501 ${plist.replaceAll("\\", "/")}`,
+        ],
+      );
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 

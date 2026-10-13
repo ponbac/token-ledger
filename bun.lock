@@ -19,7 +19,7 @@
     },
     "packages/cli": {
       "name": "@ponbac/token-ledger",
-      "version": "0.5.0",
+      "version": "0.5.1",
       "bin": {
         "token-ledger": "dist/main.js",
       },
