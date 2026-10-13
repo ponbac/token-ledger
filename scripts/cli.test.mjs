@@ -657,8 +657,14 @@ await test("login saves what a scheduled sync needs, and schedule install change
 
     assert.equal(plan.status, 0, plan.stderr);
     assert.match(plan.stdout, /npx --yes @ponbac\/token-ledger@latest sync --config /);
-    assert.ok(plan.stdout.includes(configuration));
-    assert.ok(plan.stdout.includes(`XDG_CONFIG_HOME=${join(directory, "config")}`));
+
+    // Windows prints a JScript string literal; its backslashes are escaped in the plan.
+    /** @param {string} path */
+    const printedPath = (path) =>
+      process.platform === "win32" ? path.replaceAll("\\", "\\\\") : path;
+
+    assert.ok(plan.stdout.includes(printedPath(configuration)));
+    assert.ok(plan.stdout.includes(`XDG_CONFIG_HOME=${printedPath(join(directory, "config"))}`));
     assert.match(plan.stdout, /07:05|<integer>7<\/integer>/);
 
     const refused = run(["schedule", "install", "--config", configuration]);

@@ -1,6 +1,18 @@
+import { runInNewContext } from "node:vm";
+
 import { NodeServices } from "@effect/platform-node";
 import { assert, describe as suite, it } from "@effect/vitest";
-import { Effect, FileSystem, Option, Path, PlatformError, Result, Sink, Stream } from "effect";
+import {
+  Effect,
+  FileSystem,
+  Option,
+  Path,
+  PlatformError,
+  Result,
+  Schema,
+  Sink,
+  Stream,
+} from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import {
@@ -191,10 +203,13 @@ suite("launchd agent", () => {
       );
       assert.match(contents, /<key>Hour<\/key>\s*<integer>7<\/integer>/);
       assert.match(contents, /<key>Minute<\/key>\s*<integer>5<\/integer>/);
-      assert.deepStrictEqual(lines, [
-        "launchctl bootout gui/501/com.github.ponbac.token-ledger.sync",
-        `launchctl bootstrap gui/501 ${plist}`,
-      ]);
+      assert.deepStrictEqual(
+        lines.map((line) => line.replaceAll("\\", "/")),
+        [
+          "launchctl bootout gui/501/com.github.ponbac.token-ledger.sync",
+          `launchctl bootstrap gui/501 ${plist.replaceAll("\\", "/")}`,
+        ],
+      );
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
@@ -220,38 +235,82 @@ suite("launchd agent", () => {
 });
 
 suite("Task Scheduler task", () => {
-  it.effect("registers the script it shows, quoting paths for cmd.exe and PowerShell", () =>
-    Effect.gen(function* () {
-      const { lines, spawner } = scheduler(() => 0);
+  it.effect(
+    "registers a hidden launcher that waits, forwards paths, and returns the sync exit code",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const file = path.join(yield* fs.makeTempDirectoryScoped(), "token-ledger-sync.js");
+        const { lines, spawner } = scheduler(() => 0);
 
-      const actions = yield* taskScheduler.install({
-        at: "07:05",
-        nodeDirectory: "C:\\Program Files\\nodejs",
-        configHome: Option.some("D:\\my config"),
-        flags: ["--config", "C:\\Users\\O'Neil & Co\\token-ledger.json"],
-      });
+        const actions = yield* taskScheduler(file).install({
+          at: "07:05",
+          nodeDirectory: "C:\\Program Files\\nodejs",
+          configHome: Option.some("D:\\my config"),
+          flags: ["--config", "C:\\Users\\O'Neil & Malmö 🌍\\token-ledger.json"],
+        });
 
-      yield* perform(actions).pipe(
-        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
-      );
+        yield* perform(actions).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        );
 
-      const [program, ...args] = (lines[0] ?? "").split(" ");
-      const script = Buffer.from(args.at(-1) ?? "", "base64").toString("utf16le");
+        const [program, ...args] = (lines[0] ?? "").split(" ");
+        const script = Buffer.from(args.at(-1) ?? "", "base64").toString("utf16le");
 
-      assert.strictEqual(program, "powershell.exe");
-      assert.include(describe(actions), script);
-      assert.include(
-        script,
-        `-Argument '/d /v:off /s /c "set "XDG_CONFIG_HOME=D:\\my config" && set "PATH=C:\\Program Files\\nodejs;%PATH%" && npx --yes @ponbac/token-ledger@latest sync --config "C:\\Users\\O''Neil & Co\\token-ledger.json""'`,
-      );
-      assert.include(script, "-Daily -At '07:05'");
-    }).pipe(Effect.provide(NodeServices.layer)),
+        assert.strictEqual(program, "powershell.exe");
+        assert.include(describe(actions), script);
+        assert.include(script, "-Execute 'wscript.exe'");
+        assert.include(
+          script,
+          `-Argument '//B //Nologo //E:JScript "${file.replaceAll("'", "''")}"'`,
+        );
+        assert.include(script, "-Daily -At '07:05'");
+        assert.include(
+          script,
+          "-StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries",
+        );
+
+        const launcher = yield* fs.readFileString(file);
+
+        // WSH's default code page must not change Unicode paths in this generated file.
+        assert.isTrue(Array.from(launcher).every((character) => character.charCodeAt(0) < 128));
+
+        for (const exit of [0, 7]) {
+          const commands: string[] = [];
+          const codes: number[] = [];
+
+          runInNewContext(launcher, {
+            WScript: {
+              CreateObject: (name: string) => {
+                assert.strictEqual(name, "WScript.Shell");
+
+                return {
+                  Run: (command: string, style: number, wait: boolean) => {
+                    commands.push(command);
+                    assert.strictEqual(style, 0, "the child window must be hidden");
+                    assert.isTrue(wait, "the task must wait for sync to finish");
+
+                    return exit;
+                  },
+                };
+              },
+              Quit: (code: number) => codes.push(code),
+            },
+          });
+
+          assert.deepStrictEqual(commands, [
+            `cmd.exe /d /v:off /s /c "set "XDG_CONFIG_HOME=D:\\my config" && set "PATH=C:\\Program Files\\nodejs;%PATH%" && npx --yes @ponbac/token-ledger@latest sync --config "C:\\Users\\O'Neil & Malmö 🌍\\token-ledger.json""`,
+          ]);
+          assert.deepStrictEqual(codes, [exit]);
+        }
+      }).pipe(Effect.provide(NodeServices.layer)),
   );
 
   it.effect("refuses paths cmd.exe would expand or cannot quote", () =>
     Effect.gen(function* () {
       for (const file of ["C:\\100%\\token-ledger.json", 'C:\\a"b\\token-ledger.json']) {
-        const outcome = yield* taskScheduler
+        const outcome = yield* taskScheduler("C:\\config\\token-ledger-sync.js")
           .install({
             at: "12:30",
             nodeDirectory: "C:\\nodejs",
@@ -263,5 +322,97 @@ suite("Task Scheduler task", () => {
         assert.isTrue(Result.isFailure(outcome), file);
       }
     }),
+  );
+
+  it.effect("keeps the launcher while the task exists, and removes it once the task is gone", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const file = path.join(yield* fs.makeTempDirectoryScoped(), "token-ledger-sync.js");
+      const task = taskScheduler(file);
+
+      yield* fs.writeFileString(file, "launcher");
+
+      for (const queryExit of [0, 1]) {
+        const { spawner } = scheduler((line) => (line.includes("/Query") ? queryExit : 1));
+
+        const outcome = yield* perform(task.uninstall).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+          Effect.result,
+        );
+
+        assert.strictEqual(Result.isFailure(outcome), queryExit === 0);
+        assert.strictEqual(yield* fs.exists(file), queryExit === 0);
+      }
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live.skipIf(process.platform !== "win32")(
+    "runs the generated launcher with Windows Script Host, forwarding arguments and exit codes",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const directory = yield* fs.makeTempDirectoryScoped();
+        const file = path.join(directory, "token-ledger-sync.js");
+        const fixture = path.join(directory, "fixture.mjs");
+        const receipt = path.join(directory, "receipt.json");
+        const configHome = path.join(directory, "my config");
+        const flags = ["--config", path.join(directory, "O'Neil & Malmö 🌍", "config.json")];
+
+        yield* fs.writeFileString(
+          path.join(directory, "npx.cmd"),
+          `@"${process.execPath}" "${fixture}" %*\r\n@exit /b %errorlevel%\r\n`,
+        );
+
+        for (const exit of [0, 7]) {
+          yield* fs.writeFileString(
+            fixture,
+            `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(receipt)}, JSON.stringify({ args: process.argv.slice(2), configHome: process.env.XDG_CONFIG_HOME }));\nprocess.exit(${exit});\n`,
+          );
+
+          yield* perform(
+            yield* taskScheduler(file).install({
+              at: "07:05",
+              nodeDirectory: directory,
+              configHome: Option.some(configHome),
+              flags,
+            }),
+          ).pipe(
+            Effect.provideService(
+              ChildProcessSpawner.ChildProcessSpawner,
+              scheduler(() => 0).spawner,
+            ),
+          );
+
+          const code = yield* spawner.exitCode(
+            ChildProcess.make("wscript.exe", ["//B", "//Nologo", "//E:JScript", file], {
+              stdin: "ignore",
+              stdout: "ignore",
+              stderr: "ignore",
+            }),
+          );
+
+          assert.strictEqual(code, exit);
+
+          const result = yield* fs
+            .readFileString(receipt)
+            .pipe(
+              Effect.flatMap(
+                Schema.decodeUnknownEffect(
+                  Schema.fromJsonString(
+                    Schema.Struct({ args: Schema.Array(Schema.String), configHome: Schema.String }),
+                  ),
+                ),
+              ),
+            );
+
+          assert.deepStrictEqual(result, {
+            args: ["--yes", "@ponbac/token-ledger@latest", "sync", ...flags],
+            configHome,
+          });
+        }
+      }).pipe(Effect.provide(NodeServices.layer)),
   );
 });
