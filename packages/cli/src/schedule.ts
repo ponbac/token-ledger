@@ -3,7 +3,7 @@ import { homedir, userInfo } from "node:os";
 import { Data, Effect, FileSystem, Match, Option, Path, Schema } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
-import { configHome } from "./settings.ts";
+import { configHome, settingsDirectory } from "./settings.ts";
 
 /** The OS scheduler could not be used, or a value cannot be written safely into its job. */
 export class ScheduleError extends Schema.TaggedError<ScheduleError>()("ScheduleError", {
@@ -294,58 +294,76 @@ export const powershellArguments = (script: string) => [
   Buffer.from(script, "utf16le").toString("base64"),
 ];
 
+// WSH reads an unmarked script using the Windows code page. ASCII escapes preserve Unicode
+// paths and also keep line separators out of JScript string literals.
+const jscriptString = (value: string) =>
+  JSON.stringify(value).replaceAll(
+    /[\u007f-\uffff]/g,
+    (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
+  );
+
 /**
- * A Task Scheduler task for the current user. It runs a missed sync at the next opportunity
- * and is neither blocked nor stopped by battery power. Registration goes through PowerShell,
- * because `schtasks` cannot set those options.
+ * A Task Scheduler task for the current user, with its windowless JScript launcher at `file`.
+ * It waits for sync and reports its exit code, runs missed syncs at the next opportunity, and
+ * allows battery power. Registration uses PowerShell because `schtasks` cannot set those
+ * options. Uninstall removes the launcher only after confirming the task is gone.
  */
-export const taskScheduler: Scheduler = {
-  name: "Task Scheduler task",
-  install: (job) =>
-    // cmd.exe expands `%` even inside quotes and has no escape for a quote within them;
-    // `/v:off` keeps `!` literal where delayed expansion is enabled machine-wide.
-    quotable(job, /[\p{Cc}"%]/u, 'a control character, `"`, or `%`').pipe(
-      Effect.map((job) => {
-        const command = [
-          ...Option.toArray(job.configHome).map(
-            (directory) => `set "XDG_CONFIG_HOME=${directory}"`,
-          ),
-          `set "PATH=${job.nodeDirectory};%PATH%"`,
-          `npx --yes ${packageSpec} ${["sync", ...job.flags].map(cmdWord).join(" ")}`,
-        ].join(" && ");
+export function taskScheduler(file: string): Scheduler {
+  return {
+    name: "Task Scheduler task",
+    install: (job) =>
+      // cmd.exe expands `%` even inside quotes and has no escape for a quote within them;
+      // `/v:off` keeps `!` literal where delayed expansion is enabled machine-wide.
+      quotable(job, /[\p{Cc}"%]/u, 'a control character, `"`, or `%`').pipe(
+        Effect.map((job) => {
+          const command = [
+            ...Option.toArray(job.configHome).map(
+              (directory) => `set "XDG_CONFIG_HOME=${directory}"`,
+            ),
+            `set "PATH=${job.nodeDirectory};%PATH%"`,
+            `npx --yes ${packageSpec} ${["sync", ...job.flags].map(cmdWord).join(" ")}`,
+          ].join(" && ");
 
-        const script = [
-          "$ErrorActionPreference = 'Stop'",
-          "$ProgressPreference = 'SilentlyContinue'",
-          `$action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument ${powershellString(`/d /v:off /s /c "${command}"`)}`,
-          `$trigger = New-ScheduledTaskTrigger -Daily -At '${job.at}'`,
-          "$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries",
-          `Register-ScheduledTask -TaskName ${powershellString(task)} -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null`,
-        ].join("\n");
+          const script = [
+            "$ErrorActionPreference = 'Stop'",
+            "$ProgressPreference = 'SilentlyContinue'",
+            `$action = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument ${powershellString(`//B //Nologo //E:JScript "${file}"`)}`,
+            `$trigger = New-ScheduledTaskTrigger -Daily -At '${job.at}'`,
+            "$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries",
+            `Register-ScheduledTask -TaskName ${powershellString(task)} -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null`,
+          ].join("\n");
 
-        return [
-          Action.Run({
-            program: "powershell.exe",
-            args: powershellArguments(script),
-            shown: `powershell.exe ${powershellOptions.join(" ")} <the script below, as UTF-16LE Base64>\n${script}`,
-            outcome: "required",
-            hint: "",
-            gone: [],
-          }),
-        ];
-      }),
-    ),
-  uninstall: [
-    run("reported", "schtasks.exe", ["/Delete", "/TN", task, "/F"]),
-    run(
-      "absent",
-      "schtasks.exe",
-      ["/Query", "/TN", task],
-      "The task is still registered; Task Scheduler's reason is shown above.",
-    ),
-  ],
-  status: [run("reported", "schtasks.exe", ["/Query", "/TN", task, "/V", "/FO", "LIST"])],
-};
+          return [
+            // A GUI host starts cmd hidden from the outset; hiding PowerShell after it starts
+            // can still flash a console. Waiting keeps Task Scheduler tracking the real sync.
+            Action.Write({
+              file,
+              contents: `var shell = WScript.CreateObject("WScript.Shell");\nWScript.Quit(shell.Run(${jscriptString(`cmd.exe /d /v:off /s /c "${command}"`)}, 0, true));\n`,
+            }),
+            Action.Run({
+              program: "powershell.exe",
+              args: powershellArguments(script),
+              shown: `powershell.exe ${powershellOptions.join(" ")} <the script below, as UTF-16LE Base64>\n${script}`,
+              outcome: "required",
+              hint: "",
+              gone: [],
+            }),
+          ];
+        }),
+      ),
+    uninstall: [
+      run("reported", "schtasks.exe", ["/Delete", "/TN", task, "/F"]),
+      run(
+        "absent",
+        "schtasks.exe",
+        ["/Query", "/TN", task],
+        "The task is still registered; Task Scheduler's reason is shown above.",
+      ),
+      Action.Remove({ file }),
+    ],
+    status: [run("reported", "schtasks.exe", ["/Query", "/TN", task, "/V", "/FO", "LIST"])],
+  };
+}
 
 /** The scheduler for this platform, or a `ScheduleError` where none is supported. */
 export const hostScheduler = Effect.gen(function* () {
@@ -357,7 +375,11 @@ export const hostScheduler = Effect.gen(function* () {
   return yield* Match.value(process.platform).pipe(
     Match.when("linux", () => Effect.succeed(systemdTimer(path.join(units, "systemd", "user")))),
     Match.when("darwin", () => Effect.succeed(launchAgent(home, userInfo().uid))),
-    Match.when("win32", () => Effect.succeed(taskScheduler)),
+    Match.when("win32", () =>
+      Effect.map(settingsDirectory, (directory) =>
+        taskScheduler(path.join(directory, `${unit}.js`)),
+      ),
+    ),
     Match.orElse((platform) =>
       Effect.fail(
         new ScheduleError({

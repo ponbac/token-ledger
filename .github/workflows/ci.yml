@@ -33,4 +33,6 @@ jobs:
           bun-version: 1.4.0
       - run: bun install --frozen-lockfile
       - run: bun run build
+      - if: runner.os == 'Windows'
+        run: bun run test -- packages/cli/src/schedule.test.ts
       - run: bun run test:cli

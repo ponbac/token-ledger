@@ -524,6 +524,15 @@ does not keep a process running. Run it again to change the job.
 `journalctl --user -u token-ledger-sync` on Linux and in
 `~/Library/Logs/token-ledger-sync.log` on macOS.
 
+On Windows, scheduled sync runs in the background without opening a terminal
+window. A [Windows Script Host](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/wscript)
+launcher in your token-ledger settings directory waits for sync to finish and
+passes its exit code back to Task Scheduler. Windows Script Host must be enabled.
+To update a task installed by an older CLI version, run
+`npx.cmd --yes @ponbac/token-ledger@latest schedule install` again, including any
+`--at`, `--config`, `--time-zone`, or `--provider` options you used before. This
+replaces the existing task; your saved server and token are kept.
+
 | Platform | Scheduler           | A missed run                                           |
 | -------- | ------------------- | ------------------------------------------------------ |
 | Linux    | systemd user timer  | Runs within ten minutes of your next login             |
@@ -632,13 +641,17 @@ but does not replay intervals missed while powered off.
 **Windows (Task Scheduler).** In PowerShell:
 
 ```powershell
-$action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c npx --yes @ponbac/token-ledger@latest sync"
+$runner = Join-Path $env:APPDATA "token-ledger\token-ledger-sync.js"
+New-Item -ItemType Directory -Path (Split-Path $runner) -Force | Out-Null
+'WScript.Quit(WScript.CreateObject("WScript.Shell").Run("cmd.exe /d /v:off /c npx --yes @ponbac/token-ledger@latest sync", 0, true));' | Set-Content -Path $runner -Encoding ASCII
+$action = New-ScheduledTaskAction -Execute "wscript.exe" -Argument "//B //Nologo //E:JScript `"$runner`""
 $trigger = New-ScheduledTaskTrigger -Daily -At 12:30
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-Register-ScheduledTask -TaskName "token-ledger sync" -Action $action -Trigger $trigger -Settings $settings
+Register-ScheduledTask -TaskName "token-ledger sync" -Action $action -Trigger $trigger -Settings $settings -Force
 ```
 
-`-StartWhenAvailable` runs a missed sync at the next opportunity. The battery
+The launcher hides the sync window and waits for its exit code. `//B` prevents
+script dialogs. `-StartWhenAvailable` runs a missed sync at the next opportunity. The battery
 switches allow starts on battery and keep a running sync from being stopped when
 AC power disconnects. See [Task Scheduler settings](https://learn.microsoft.com/en-us/powershell/module/scheduledtasks/new-scheduledtasksettingsset).
 
