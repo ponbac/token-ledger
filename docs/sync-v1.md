@@ -22,6 +22,12 @@ Clients send the oldest version that carries every bucket: 3 when a bucket is pa
 priced, otherwise 2 for an override, otherwise 1. Deploy server support first: an older
 server rejects version 3 with `422`, keeping its stored usage.
 
+Any version may carry `snapshotAt`, the UTC instant at which the client began scanning
+history, so the payload holds every record written before it. A server keeps the last
+applied `snapshotAt` per machine and refuses an older one with `409`, so a slow sync
+cannot overwrite a newer one from the same machine. It is optional: servers without
+this guard ignore it, and a payload without it is not ordered.
+
 ## Request
 
 ```http
@@ -74,7 +80,8 @@ A synthetic example:
       "skippedRecords": 0,
       "duplicates": 2
     }
-  ]
+  ],
+  "snapshotAt": "2026-09-22T09:41:07.512Z"
 }
 ```
 
@@ -97,6 +104,7 @@ A synthetic example:
 | `unpricedRecords`  | Records without a known price.                                                                                                              |
 | `coverage[]`       | One entry per scanned provider, with file and diagnostic counts; `status` decides replacement (below).                                      |
 | `providerHints[]`  | Optional `{ provider, hourStart, plan }` evidence of a billing plan, such as Codex `plan_type`. Declared subscriptions win.                 |
+| `snapshotAt`       | Optional UTC instant at which the history scan began; any version. Orders uploads from one machine (see below).                             |
 
 ## Plan hints
 
@@ -151,7 +159,9 @@ buckets in the window are replaced with none. Copilot exports are always opened.
 
 1. Reject a machine ID that belongs to another user.
 2. Reject a bucket or hint for a provider that is not replaced, or outside `window`.
-3. In one transaction, for each **replaced** provider (`ok` or `partial`), delete the
+3. In one transaction, refuse with `409` and change nothing when `snapshotAt` is older
+   than the last one applied from the machine; an equal one is accepted.
+   Otherwise remember it, and for each **replaced** provider (`ok` or `partial`), delete the
    machine's stored buckets for that provider with `hourStart` in `window`, then insert
    the payload's buckets for it. Other providers' stored buckets are untouched.
    Uploading the same payload twice leaves the same state.
@@ -172,11 +182,14 @@ buckets in the window are replaced with none. Copilot exports are always opened.
 | `400 Bad Request`          | The body is not a valid payload.                                  |
 | `401 Unauthorized`         | Missing, invalid, or expired API token.                           |
 | `403 Forbidden`            | The machine ID belongs to another user.                           |
+| `409 Conflict`             | `snapshotAt` is older than the machine's last applied upload.     |
 | `422 Unprocessable Entity` | Unsupported `version`; body `{ "supportedVersions": [1, 2, 3] }`. |
 | `5xx`                      | A temporary server failure; the client retries later.             |
 
-Use `422` only for an unsupported version, and `5xx` only for failures a retry can
-fix; validation errors are `400`.
+Use `422` only for an unsupported version, `409` only for a superseded snapshot, and
+`5xx` only for failures a retry can fix; validation errors are `400`. The client does
+not resend a payload refused with `409`. The newer upload may hold another window or
+tools, so it scans the same window again once and sends that newer payload.
 
 A two-week window is typically a few hundred kilobytes, but a long `--since` window
 can reach several megabytes; Axum's default 2 MB body limit is too small.

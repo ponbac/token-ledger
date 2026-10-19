@@ -1,4 +1,5 @@
 import {
+  Clock,
   Context,
   DateTime,
   Effect,
@@ -437,6 +438,9 @@ export class Ledger extends Context.Service<
         const buckets = sessionBuckets(request.pricing);
         const hints = planHints();
         let earliest = requested.start;
+        // Taken before reading, so the payload holds every record written before it. The server
+        // refuses an upload whose snapshot is older than the last it applied from this machine.
+        const snapshotAt = yield* Clock.currentTimeMillis;
 
         const coverage = yield* scan(
           request,
@@ -489,6 +493,7 @@ export class Ledger extends Context.Service<
           buckets: uploadedBuckets,
           coverage: summary,
           providerHints: hints.finish().filter((hint) => replaced.has(hint.provider)),
+          snapshotAt: new Date(snapshotAt).toISOString(),
         }).pipe(
           Effect.mapError(
             () =>

@@ -24,6 +24,7 @@ import {
   Match,
   Option,
   Path,
+  Predicate,
   Result,
   Schema,
 } from "effect";
@@ -537,17 +538,40 @@ const sync = Command.make(
     )
       result = yield* usual(result.value.outcome.failure.message);
 
+    // A newer upload from this machine landed during the scan, but it need not hold this
+    // upload's window or tools. A fresh scan of the same window is newer still, so it is sent.
+    if (
+      Option.isSome(result) &&
+      Result.isFailure(result.value.outcome) &&
+      Predicate.isTagged(result.value.outcome.failure, "SyncSuperseded")
+    ) {
+      const { since } = result.value.sent;
+
+      yield* Console.error(
+        `A newer sync from this machine reached the server first; scanning ${since} through ${request.until} again.`,
+      );
+
+      const payload = yield* ledger.syncPayload({ ...request, since }, client, Console.error);
+
+      result =
+        (yield* examine(payload)) && flags.strict
+          ? Option.none()
+          : Option.some({ sent: { payload, since }, outcome: yield* send(payload) });
+    }
+
     if (Option.isNone(result)) return yield* refused;
 
     const { sent, outcome } = result.value;
 
     if (Result.isFailure(outcome)) {
       yield* Console.error(outcome.failure.message);
+
       process.exitCode = Match.value(outcome.failure).pipe(
         Match.tag("SyncUnreachable", () => 3),
         Match.tag("SyncUnauthorized", () => 4),
         Match.tag("SyncUnsupportedVersion", () => 5),
         Match.tag("SyncRejected", () => 6),
+        Match.tag("SyncSuperseded", () => 7),
         Match.exhaustive,
       );
 
