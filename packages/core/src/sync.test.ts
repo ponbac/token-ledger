@@ -6,6 +6,7 @@ import { PriceBook, type Coverage } from "./model.ts";
 import {
   SyncCoverage,
   SyncPayload,
+  payloadVersion,
   providerCoverage,
   replacedProviders,
   sessionBuckets,
@@ -186,4 +187,75 @@ it("only builds payloads the server can store", () => {
     { ...payload, pricing: { ...payload.pricing, fetchedAt: "yesterday" } },
   ])
     assert.isFalse(valid(invalid));
+});
+
+it("uploads the priced subtotal of a bucket that also has unpriced records", () => {
+  const buckets = sessionBuckets(
+    PriceBook.make({
+      status: "custom",
+      fetchedAt: null,
+      source: "fixture",
+      // Like OpenAI rates upstream: no cache-write price.
+      prices: { priced: { input: 1, output: 0, cacheRead: 0.1, cacheWrite: null } },
+    }),
+  );
+
+  const record = (id: string, model: string, cacheWrite: number) =>
+    buckets.add(
+      {
+        provider: "copilot",
+        id,
+        session: "session",
+        timestamp: Date.parse("2026-09-22T10:00:00Z"),
+        model,
+        cwd: null,
+        repository: null,
+        tokens: { input: 1_000_000, cacheRead: 0, cacheWrite, output: 0 },
+      },
+      "project",
+    );
+
+  record("costs-one-dollar", "priced", 0);
+  record("writes-cache", "priced", 10);
+  record("no-price", "unknown-model", 0);
+
+  const finished = buckets.finish();
+  assert.deepStrictEqual(
+    finished.map((bucket) => [bucket.model, bucket.estimatedCostUsd, bucket.unpricedRecords]),
+    [
+      ["priced", 1, 1],
+      ["unknown-model", null, 1],
+    ],
+  );
+  assert.strictEqual(payloadVersion(finished), 3);
+
+  const payload = {
+    version: 3,
+    machine: { id: "5f0c5a1e-3b8e-4d8e-9a57-0d7b1c1f2e3a", label: "test-machine" },
+    clientVersion: "0.0.0-test",
+    timeZone: "Europe/Stockholm",
+    window: { start: "2026-09-22T00:00:00.000Z", end: "2026-09-23T00:00:00.000Z" },
+    currency: "USD",
+    costBasis: "api-equivalent",
+    pricing: { status: "custom", fetchedAt: null, source: "fixture" },
+    buckets: finished,
+    coverage: [
+      {
+        provider: "copilot",
+        status: "ok",
+        files: 1,
+        unreadable: 0,
+        malformedLines: 0,
+        skippedRecords: 0,
+        duplicates: 0,
+      },
+    ],
+  };
+
+  const valid = Schema.is(SyncPayload);
+  assert.isTrue(valid(payload));
+  // Older servers require a null cost whenever any record is unpriced.
+  assert.isFalse(valid({ ...payload, version: 2 }));
+  assert.isTrue(valid({ ...payload, version: 1, buckets: finished.slice(1) }));
+  assert.strictEqual(payloadVersion(finished.slice(1)), 1);
 });

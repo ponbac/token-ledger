@@ -68,7 +68,11 @@ export interface SyncClient extends Schema.Schema.Type<typeof SyncClient> {}
 
 const Cost = Schema.Number.check(Schema.isFinite(), Schema.isGreaterThanOrEqualTo(0));
 
-/** One session's usage of one model during one UTC hour. Null cost means some records are unpriced. */
+/**
+ * One session's usage of one model during one UTC hour. The cost is the priced records'
+ * subtotal, so it is a lower bound while `unpricedRecords` is positive, and `null` only when
+ * every record is unpriced. Buckets mixing priced and unpriced records need payload version 3.
+ */
 export const SyncBucket = Schema.Struct({
   billingProvider: Schema.optionalKey(BillingProvider),
   hourStart: UtcHour,
@@ -85,7 +89,7 @@ export const SyncBucket = Schema.Struct({
     (bucket) =>
       bucket.billingProvider !== bucket.provider &&
       bucket.unpricedRecords <= bucket.records &&
-      (bucket.estimatedCostUsd === null) === bucket.unpricedRecords > 0,
+      (bucket.estimatedCostUsd === null) === (bucket.unpricedRecords === bucket.records),
   ),
 );
 
@@ -135,8 +139,23 @@ export const ProviderHint = Schema.Struct({
 /** Evidence of subscription usage; declared subscriptions remain authoritative. */
 export interface ProviderHint extends Schema.Schema.Type<typeof ProviderHint> {}
 
+/** Whether a bucket's cost is a known subtotal with unpriced records on top. */
+function partlyPriced(bucket: SyncBucket): boolean {
+  return bucket.unpricedRecords > 0 && bucket.unpricedRecords < bucket.records;
+}
+
 /**
- * Version 1 or 2 upload for `PUT /ai-usage/machines/{machineId}/usage`. For each provider whose
+ * The oldest payload version that can carry the buckets: 3 for partly priced buckets, whose
+ * known subtotal versions 1 and 2 cannot represent, 2 for billing overrides, otherwise 1.
+ */
+export function payloadVersion(buckets: readonly SyncBucket[]): SyncPayload["version"] {
+  if (buckets.some(partlyPriced)) return 3;
+
+  return buckets.some((bucket) => bucket.billingProvider !== undefined) ? 2 : 1;
+}
+
+/**
+ * Version 1, 2, or 3 upload for `PUT /ai-usage/machines/{machineId}/usage`. For each provider whose
  * coverage is `ok` or `partial`, the server replaces the machine's stored buckets for that
  * provider with `hourStart` in the half-open `window`; other providers keep their stored data.
  * The window is on whole UTC hours, and every bucket and plan hint lies inside it and belongs
@@ -144,7 +163,7 @@ export interface ProviderHint extends Schema.Schema.Type<typeof ProviderHint> {}
  * only; all instants are UTC.
  */
 export const SyncPayload = Schema.Struct({
-  version: Schema.Literals([1, 2]),
+  version: Schema.Literals([1, 2, 3]),
   machine: SyncMachine,
   clientVersion: NonEmptyText,
   timeZone: NonEmptyText,
@@ -164,8 +183,9 @@ export const SyncPayload = Schema.Struct({
 }).check(
   Schema.makeFilter(
     (payload) =>
-      (payload.version === 2 ||
+      (payload.version >= 2 ||
         payload.buckets.every((bucket) => bucket.billingProvider === undefined)) &&
+      (payload.version >= 3 || !payload.buckets.some(partlyPriced)) &&
       distinct(payload.buckets, (bucket) =>
         JSON.stringify([
           bucket.hourStart,
@@ -180,7 +200,10 @@ export const SyncPayload = Schema.Struct({
       distinct(payload.providerHints ?? [], (hint) =>
         JSON.stringify([hint.provider, hint.hourStart, hint.plan]),
       ),
-    { expected: "unique bucket keys, coverage providers, and plan hints" },
+    {
+      expected:
+        "unique bucket keys, coverage providers, and plan hints, and a version carrying every bucket",
+    },
   ),
   Schema.makeFilter((payload) => {
     const replaced = replacedProviders(payload.coverage);
@@ -277,7 +300,8 @@ export function sessionBuckets(pricing: PriceBook) {
             model,
             tokens: usage.tokens,
             records: usage.records,
-            estimatedCostUsd: usage.estimatedCostUsd,
+            // The priced subtotal survives unpriced records, as in local reports.
+            estimatedCostUsd: usage.unpricedRecords === usage.records ? null : usage.pricedCostUsd,
             unpricedRecords: usage.unpricedRecords,
           };
 

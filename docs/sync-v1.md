@@ -1,4 +1,4 @@
-# Sync payload, versions 1 and 2
+# Sync payload, versions 1, 2, and 3
 
 The contract between `token-ledger sync` and the toki2 ingest endpoint. The Effect
 Schema `SyncPayload` in [`packages/core/src/sync.ts`](../packages/core/src/sync.ts) is
@@ -11,6 +11,16 @@ The source `provider` remains unchanged. The bucket key additionally includes
 same hour, session, project and model. Coverage and replacement still use the source
 provider. Version 1 cannot carry billing overrides. Clients send version 2 only when
 at least one uploaded bucket has an override. See [local billing hints](billing-hints.md).
+
+Version 3 keeps the priced subtotal of a bucket that mixes priced and unpriced records,
+which happens when a priced model's rates lack a token kind a record used, such as cache
+writes for OpenAI, Gemini, and xAI models. In versions 1 and 2 `estimatedCostUsd` is
+`null` whenever any record is unpriced, which drops the priced records' cost. In version 3
+it is the priced records' subtotal, a lower bound while `unpricedRecords` is positive, and
+`null` only when every record is unpriced. Version 3 also accepts `billingProvider`.
+Clients send the oldest version that carries every bucket: 3 when a bucket is partly
+priced, otherwise 2 for an override, otherwise 1. Deploy server support first: an older
+server rejects version 3 with `422`, keeping its stored usage.
 
 ## Request
 
@@ -83,7 +93,7 @@ A synthetic example:
 | `project`          | Project key; see below.                                                                                                                     |
 | `tokens`           | Disjoint counts: `input` excludes cache reads and writes; reasoning is inside `output`.                                                     |
 | `records`          | Deduplicated provider requests in the bucket; at least 1.                                                                                   |
-| `estimatedCostUsd` | API-equivalent USD, or `null` when any record in the bucket could not be priced. `null` is unknown, never zero.                             |
+| `estimatedCostUsd` | API-equivalent USD of the priced records, or `null` when none was priced (any, before version 3). `null` is unknown, never zero.            |
 | `unpricedRecords`  | Records without a known price.                                                                                                              |
 | `coverage[]`       | One entry per scanned provider, with file and diagnostic counts; `status` decides replacement (below).                                      |
 | `providerHints[]`  | Optional `{ provider, hourStart, plan }` evidence of a billing plan, such as Codex `plan_type`. Declared subscriptions win.                 |
@@ -114,7 +124,8 @@ Text fields (`machine.label`, `clientVersion`, `timeZone`, `pricing.source`, `pr
 `model`, and `plan`) contain no NUL characters and at most 512 characters (code points).
 The client replaces NULs in provider data with U+FFFD and truncates longer values.
 Bucket keys, coverage providers, and plan hints are each unique. `unpricedRecords` never
-exceeds `records`, and `estimatedCostUsd` is `null` exactly when `unpricedRecords > 0`.
+exceeds `records`. `estimatedCostUsd` is `null` exactly when `unpricedRecords > 0` in
+versions 1 and 2, and exactly when `unpricedRecords` equals `records` in version 3.
 `pricing.fetchedAt` is a UTC instant or `null`.
 
 ## Coverage status
@@ -148,20 +159,21 @@ buckets in the window are replaced with none. Copilot exports are always opened.
    last sync time.
 5. Sum buckets across machines. Keep unknown costs visible: an aggregate with any
    `null` cost is a known subtotal plus unpriced usage, not a total. The known
-   subtotal sums fully priced buckets only. A bucket mixing priced and unpriced
-   records has a `null` cost, so v1 also omits its priced records from that subtotal.
+   subtotal sums every non-null bucket cost. A version 1 or 2 bucket mixing priced and
+   unpriced records has a `null` cost, so its priced records are missing from that
+   subtotal; version 3 includes them.
 6. Group days and billing months in `Europe/Stockholm`.
 
 ## Responses
 
-| Status                     | Meaning                                                     |
-| -------------------------- | ----------------------------------------------------------- |
-| `200 OK`                   | Stored; body `{ "storedBuckets": <number> }`.               |
-| `400 Bad Request`          | The body is not a valid payload.                            |
-| `401 Unauthorized`         | Missing, invalid, or expired API token.                     |
-| `403 Forbidden`            | The machine ID belongs to another user.                     |
-| `422 Unprocessable Entity` | Unsupported `version`; body `{ "supportedVersions": [1] }`. |
-| `5xx`                      | A temporary server failure; the client retries later.       |
+| Status                     | Meaning                                                           |
+| -------------------------- | ----------------------------------------------------------------- |
+| `200 OK`                   | Stored; body `{ "storedBuckets": <number> }`.                     |
+| `400 Bad Request`          | The body is not a valid payload.                                  |
+| `401 Unauthorized`         | Missing, invalid, or expired API token.                           |
+| `403 Forbidden`            | The machine ID belongs to another user.                           |
+| `422 Unprocessable Entity` | Unsupported `version`; body `{ "supportedVersions": [1, 2, 3] }`. |
+| `5xx`                      | A temporary server failure; the client retries later.             |
 
 Use `422` only for an unsupported version, and `5xx` only for failures a retry can
 fix; validation errors are `400`.
