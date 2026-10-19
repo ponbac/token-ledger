@@ -1106,6 +1106,100 @@ describe("Ledger sync payloads through the public interface", () => {
     }).pipe(Effect.provide(runtime)),
   );
 
+  it.effect("counts a span without a response ID once with its inference event's billing", () =>
+    Effect.gen(function* () {
+      const { write, root, path } = yield* fixture();
+      const endTime = [Date.parse("2026-09-22T10:05:00Z") / 1000, 0];
+
+      const usage = {
+        "gen_ai.operation.name": "chat",
+        "gen_ai.response.model": "test-model",
+        "gen_ai.usage.input_tokens": 100,
+        "gen_ai.usage.output_tokens": 20,
+      };
+
+      // The event is read first, from another file, and omits the span's cache details.
+      yield* write("otel/a-logs.jsonl", [
+        JSON.stringify({
+          hrTime: endTime,
+          spanContext: { traceId: "trace", spanId: "chat" },
+          attributes: {
+            ...usage,
+            "event.name": "gen_ai.client.inference.operation.details",
+            "gen_ai.response.id": "routed",
+          },
+        }),
+      ]);
+      yield* write("otel/z-spans.jsonl", [
+        JSON.stringify({
+          traceId: "trace",
+          spanId: "chat",
+          endTime,
+          attributes: { ...usage, "gen_ai.usage.cache_read.input_tokens": 60 },
+        }),
+      ]);
+      yield* write("hints/chatgpt-proxy.jsonl", [
+        JSON.stringify({ requestId: "routed", billingProvider: "codex", authMode: "chatgpt" }),
+      ]);
+      const ledger = yield* Ledger;
+
+      const payload = yield* ledger.syncPayload(
+        {
+          ...request([{ provider: "copilot", path: path.join(root, "otel") }]),
+          billingHints: { directory: path.join(root, "hints"), required: false },
+        },
+        client,
+      );
+
+      assert.deepStrictEqual(
+        payload.buckets.map((bucket) => [bucket.billingProvider ?? null, bucket.records]),
+        [["codex", 1]],
+      );
+      assert.deepStrictEqual(payload.buckets[0]?.tokens, {
+        input: 40,
+        output: 20,
+        cacheRead: 60,
+        cacheWrite: 0,
+      });
+      assert.strictEqual(payload.coverage[0]?.duplicates, 1);
+    }).pipe(Effect.provide(runtime)),
+  );
+
+  it.effect("keeps separate requests whose inference events share a non-request span", () =>
+    Effect.gen(function* () {
+      const { write, root, path } = yield* fixture();
+      const endTime = [Date.parse("2026-09-22T10:05:00Z") / 1000, 0];
+
+      const event = (responseId: string) =>
+        JSON.stringify({
+          hrTime: endTime,
+          spanContext: { traceId: "trace", spanId: "agent" },
+          attributes: {
+            "event.name": "gen_ai.client.inference.operation.details",
+            "gen_ai.operation.name": "chat",
+            "gen_ai.response.model": "test-model",
+            "gen_ai.response.id": responseId,
+            "gen_ai.usage.input_tokens": 100,
+            "gen_ai.usage.output_tokens": 20,
+          },
+        });
+
+      yield* write("otel/logs.jsonl", [event("first"), event("second")]);
+      const ledger = yield* Ledger;
+
+      const payload = yield* ledger.syncPayload(
+        request([{ provider: "copilot", path: path.join(root, "otel") }]),
+        client,
+      );
+
+      assert.deepStrictEqual(
+        payload.buckets.map((bucket) => bucket.records),
+        [2],
+      );
+      assert.strictEqual(payload.coverage[0]?.duplicates, 0);
+    }).pipe(Effect.provide(runtime)),
+  );
+
   it.effect(
     "keeps stored Copilot usage for broken hints while syncing other providers and reporting normally",
     () =>

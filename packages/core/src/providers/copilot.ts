@@ -61,6 +61,7 @@ interface AttributionSpan {
 interface Candidate {
   readonly record: UsageRecord;
   readonly spanKey: string | undefined;
+  readonly responseId: string | undefined;
   readonly isSpan: boolean;
 }
 
@@ -158,12 +159,9 @@ export function copilotParser(
 
       if (!Number.isFinite(new Date(ms).getTime())) return skipped;
 
-      const base: UsageRecord = {
+      const record: UsageRecord = {
         provider: "copilot",
-        id:
-          a["gen_ai.response.id"] === undefined
-            ? `${span.traceId}:${span.spanId}`
-            : `response:${a["gen_ai.response.id"]}`,
+        id: `${span.traceId}:${span.spanId}`,
         session: a["gen_ai.conversation.id"] ?? a["session.id"] ?? file,
         timestamp: ms,
         model: a["gen_ai.response.model"] ?? a["gen_ai.request.model"] ?? "unknown",
@@ -172,21 +170,48 @@ export function copilotParser(
         tokens: { input: input - cacheRead - cacheWrite, output, cacheRead, cacheWrite },
       };
 
-      const responseId = a["gen_ai.response.id"];
-
-      const record: UsageRecord =
-        responseId !== undefined && chatgptRequests.has(responseId)
-          ? { ...base, billingProvider: "codex" }
-          : base;
-
-      candidates.push({ record, spanKey, isSpan: exportedSpan !== null });
+      candidates.push({
+        record,
+        spanKey,
+        responseId: a["gen_ai.response.id"],
+        isSpan: exportedSpan !== null,
+      });
 
       return empty;
     },
     finish() {
+      // A request span may lack the response ID its inference event carries. It takes the
+      // ID when exactly one event shares its span key, so the request counts once. Events keep
+      // their own IDs: separate requests can log events under one non-request span.
+      const eventResponses = new Map<string, Set<string>>();
+
+      for (const { spanKey, responseId, isSpan } of candidates)
+        if (!isSpan && spanKey !== undefined && responseId !== undefined)
+          eventResponses.set(spanKey, (eventResponses.get(spanKey) ?? new Set()).add(responseId));
+
+      const identified = candidates.map((candidate): Candidate => {
+        const shared =
+          candidate.isSpan && candidate.responseId === undefined && candidate.spanKey !== undefined
+            ? eventResponses.get(candidate.spanKey)
+            : undefined;
+
+        const responseId = shared?.size === 1 ? [...shared][0] : candidate.responseId;
+
+        if (responseId === undefined) return candidate;
+        const record = { ...candidate.record, id: `response:${responseId}` };
+
+        return {
+          ...candidate,
+          responseId,
+          record: chatgptRequests.has(responseId)
+            ? { ...record, billingProvider: "codex" }
+            : record,
+        };
+      });
+
       const preferred = new Map<string, Candidate>();
 
-      for (const candidate of candidates) {
+      for (const candidate of identified) {
         let repository = candidate.record.repository;
         let key = candidate.spanKey;
         const visited = new Set<string>();
@@ -216,7 +241,7 @@ export function copilotParser(
       }
 
       // Preserve duplicate accounting in Ledger while presenting the enriched record first.
-      const records = candidates.map(
+      const records = identified.map(
         (candidate) => preferred.get(candidate.record.id)?.record ?? candidate.record,
       );
 
