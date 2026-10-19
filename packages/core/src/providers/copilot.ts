@@ -78,7 +78,10 @@ function repositoryReference(attributes: typeof CopilotAttributes.Type): UsageRe
 }
 
 /** Buffers one Copilot source to resolve out-of-order spans before request deduplication. */
-export function copilotParser(file: string): TranscriptParser {
+export function copilotParser(
+  file: string,
+  chatgptRequests: ReadonlySet<string> = new Set(),
+): TranscriptParser {
   const spans = new Map<string, AttributionSpan>();
   const candidates: Candidate[] = [];
 
@@ -155,7 +158,7 @@ export function copilotParser(file: string): TranscriptParser {
 
       if (!Number.isFinite(new Date(ms).getTime())) return skipped;
 
-      const record: UsageRecord = {
+      const base: UsageRecord = {
         provider: "copilot",
         id:
           a["gen_ai.response.id"] === undefined
@@ -168,6 +171,13 @@ export function copilotParser(file: string): TranscriptParser {
         repository: repositoryReference(a),
         tokens: { input: input - cacheRead - cacheWrite, output, cacheRead, cacheWrite },
       };
+
+      const responseId = a["gen_ai.response.id"];
+
+      const record: UsageRecord =
+        responseId !== undefined && chatgptRequests.has(responseId)
+          ? { ...base, billingProvider: "codex" }
+          : base;
 
       candidates.push({ record, spanKey, isSpan: exportedSpan !== null });
 

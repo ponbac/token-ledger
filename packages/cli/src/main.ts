@@ -31,6 +31,7 @@ import { Command, Flag, Prompt } from "effect/cli";
 import { FetchHttpClient } from "effect/http";
 
 import metadata from "../package.json" with { type: "json" };
+import { billingHintsDirectory, dataHome } from "./billing-hints.ts";
 
 import {
   type Host,
@@ -256,6 +257,21 @@ const usageRequest = Effect.fn("CLI.usageRequest")(function* (
     );
 
   const request = yield* ReportRequest.makeEffect({
+    billingHints:
+      configuration.billingHintsDirectory === undefined
+        ? {
+            directory: billingHintsDirectory(
+              process.platform,
+              home,
+              yield* Config.String("LOCALAPPDATA").pipe(Config.option),
+              yield* dataHome,
+            ),
+            required: false,
+          }
+        : {
+            directory: expand(configuration.billingHintsDirectory, path.dirname(configFile)),
+            required: true,
+          },
     since: Option.getOrElse(flags.since, () => defaultSince(today)),
     until: Option.getOrElse(flags.until, () => today),
     timeZone,
@@ -412,8 +428,11 @@ const sync = Command.make(
       );
 
     const first = whole
-      ? yield* ledger.historyPayload(request, client)
-      : { payload: yield* ledger.syncPayload(request, client), since: request.since };
+      ? yield* ledger.historyPayload(request, client, Console.error)
+      : {
+          payload: yield* ledger.syncPayload(request, client, Console.error),
+          since: request.since,
+        };
 
     if (whole)
       yield* Console.error(
@@ -487,7 +506,7 @@ const sync = Command.make(
         `${reason} Uploading ${request.since} through ${request.until} instead; send earlier history in parts with --since and --until.`,
       );
 
-      const payload = yield* ledger.syncPayload(request, client);
+      const payload = yield* ledger.syncPayload(request, client, Console.error);
 
       return (yield* examine(payload)) && flags.strict
         ? Option.none()
@@ -652,6 +671,7 @@ const scheduleInstall = Command.make(
       at: flags.at,
       nodeDirectory: path.dirname(process.execPath),
       configHome: yield* configHome,
+      dataHome: yield* dataHome,
       flags: [
         ...Option.match(config, { onNone: () => [], onSome: (file) => ["--config", file] }),
         ...Option.match(flags.timeZone, {

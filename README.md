@@ -451,6 +451,11 @@ Keep developer identity alongside exported reports when combining them across a 
 
 ## Sync to toki2
 
+Copilot requests routed through a ChatGPT OAuth proxy can use
+[local billing hints](docs/billing-hints.md). On Windows the proxy appends metadata to
+`%LOCALAPPDATA%\token-ledger\billing-hints\chatgpt-proxy.jsonl`; no path configuration
+is needed. Usage stays attributed to Copilot, with ChatGPT/Codex as its subscription payer.
+
 `sync` uploads this machine's usage to a [toki2](https://github.com/ponbac/toki2)
 server, which combines every developer's machines for team reporting and billing.
 Run it on **every machine** where you use a coding agent, and schedule it daily.
@@ -762,7 +767,7 @@ For manual publication:
 1. Log in with `npm login` using an account with publish access to `@ponbac/token-ledger`.
 2. Run `bun run check`. The CLI test packs the package, installs it offline outside
    the repository with lifecycle scripts disabled, and exercises the installed CLI.
-3. Run `bun run pack` to create `dist/ponbac-token-ledger-0.5.1.tgz` (filename follows version).
+3. Run `bun run pack` to create `dist/ponbac-token-ledger-0.6.0.tgz` (filename follows version).
 4. Inspect `npm publish ./dist/npm --dry-run`.
 5. Publish with `npm publish ./dist/npm --access public`; complete npm's authentication
    prompt if requested.

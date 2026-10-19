@@ -31,6 +31,7 @@ const job: ScheduledSync = {
   at: "07:05",
   nodeDirectory: "/opt/node 24/bin",
   configHome: Option.some("/home/me/my config"),
+  dataHome: Option.none(),
   flags: ["--config", awkward, "--time-zone", "Europe/Stockholm"],
 };
 
@@ -75,6 +76,19 @@ function scheduler(exit: (line: string) => number | null) {
 }
 
 suite("systemd user timer", () => {
+  it.effect("preserves the XDG data root without making optional hints a required source", () =>
+    Effect.gen(function* () {
+      const actions = yield* systemdTimer("/tmp/units").install({
+        ...job,
+        dataHome: Option.some("/home/me/my data"),
+      });
+
+      const plan = describe(actions);
+      assert.include(plan, "export XDG_DATA_HOME='/home/me/my data'");
+      assert.notInclude(plan, "--billing-hints-dir");
+    }),
+  );
+
   it.effect("installs units that carry awkward paths through systemd and the shell", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -248,6 +262,7 @@ suite("Task Scheduler task", () => {
           at: "07:05",
           nodeDirectory: "C:\\Program Files\\nodejs",
           configHome: Option.some("D:\\my config"),
+          dataHome: Option.none(),
           flags: ["--config", "C:\\Users\\O'Neil & Malmö 🌍\\token-ledger.json"],
         });
 
@@ -315,6 +330,7 @@ suite("Task Scheduler task", () => {
             at: "12:30",
             nodeDirectory: "C:\\nodejs",
             configHome: Option.none(),
+            dataHome: Option.none(),
             flags: ["--config", file],
           })
           .pipe(Effect.result);
@@ -377,6 +393,7 @@ suite("Task Scheduler task", () => {
               at: "07:05",
               nodeDirectory: directory,
               configHome: Option.some(configHome),
+              dataHome: Option.none(),
               flags,
             }),
           ).pipe(
