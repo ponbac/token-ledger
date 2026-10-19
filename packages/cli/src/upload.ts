@@ -21,7 +21,7 @@ export class SyncUnsupportedVersion extends Schema.TaggedError<SyncUnsupportedVe
 
 /**
  * The server already applied an upload from this machine whose scan began later (409), so this
- * one's older snapshot was not stored. The usage the server keeps is newer; nothing failed.
+ * one's older snapshot was not stored. The newer upload may cover another window or tools.
  */
 export class SyncSuperseded extends Schema.TaggedError<SyncSuperseded>()("SyncSuperseded", {
   message: Schema.String,
@@ -92,7 +92,7 @@ const readResponse = Effect.fn("Sync.readResponse")(function* (
       Effect.fail(
         new SyncSuperseded({
           message:
-            "Not stored: superseded by a newer sync from this machine, which the server keeps. If every sync says this, check this machine's clock.",
+            "Not stored: superseded by a newer sync from this machine. Run sync again to send this window; if every sync says this, check this machine's clock.",
         }),
       ),
     ),

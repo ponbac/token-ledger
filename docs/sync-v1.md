@@ -188,7 +188,8 @@ buckets in the window are replaced with none. Copilot exports are always opened.
 
 Use `422` only for an unsupported version, `409` only for a superseded snapshot, and
 `5xx` only for failures a retry can fix; validation errors are `400`. The client does
-not retry a `409`: the server already holds a newer scan of the machine.
+not resend a payload refused with `409`. The newer upload may hold another window or
+tools, so it scans the same window again once and sends that newer payload.
 
 A two-week window is typically a few hundred kilobytes, but a long `--since` window
 can reach several megabytes; Axum's default 2 MB body limit is too small.

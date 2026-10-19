@@ -209,12 +209,14 @@ await test("npm artifact installs offline and exports reports with correct cover
   }
 });
 
-await test("sync uploads the same usage on every run, exits 0 when superseded and 4 when refused", async () => {
+await test("sync uploads the same usage on every run, rescans once when superseded and exits 4 when refused", async () => {
   const directory = mkdtempSync(join(tmpdir(), "token-ledger-sync-"));
   const token = "toki_fixture_secret";
   /** @type {{ method: string | undefined; url: string | undefined; authorization: string | undefined; body: string }[]} */
   const requests = [];
   let status = 200;
+  /** @type {number[]} Statuses for the next uploads, before `status` applies. */
+  const answers = [];
 
   const server = createServer((request, response) => {
     let body = "";
@@ -229,8 +231,9 @@ await test("sync uploads the same usage on every run, exits 0 when superseded an
         authorization: request.headers.authorization,
         body,
       });
-      response.writeHead(status, { "content-type": "application/json" });
-      response.end(JSON.stringify(status === 200 ? { storedBuckets: 1 } : {}));
+      const answer = answers.shift() ?? status;
+      response.writeHead(answer, { "content-type": "application/json" });
+      response.end(JSON.stringify(answer === 200 ? { storedBuckets: 1 } : {}));
     });
   });
 
@@ -338,11 +341,23 @@ await test("sync uploads the same usage on every run, exits 0 when superseded an
     const { snapshotAt: _shown, ...shown } = decodePayload(dryRun.stdout);
     assert.deepEqual(shown, payload);
 
+    // A newer upload need not hold this window, so a superseded one is scanned and sent again.
+    answers.push(409);
+    const rescanned = await run([]);
+
+    assert.equal(rescanned.status, 0, rescanned.stderr);
+    assert.equal(requests.length, 4);
+    assert.match(rescanned.stderr, /reached the server first; scanning/);
+    assert.match(rescanned.stdout, /Synced/);
+    const { snapshotAt: stale } = decodePayload(requests[2]?.body ?? "");
+    const { snapshotAt: fresh } = decodePayload(requests[3]?.body ?? "");
+    assert.ok(stale !== undefined && fresh !== undefined && fresh > stale);
+
     status = 409;
     const superseded = await run([]);
 
-    assert.equal(superseded.status, 0, superseded.stderr);
-    assert.equal(requests.length, 3);
+    assert.equal(superseded.status, 7, superseded.stderr);
+    assert.equal(requests.length, 6);
     assert.match(superseded.stderr, /superseded by a newer sync from this machine/);
     assert.doesNotMatch(superseded.stdout, /Synced/);
 
@@ -351,7 +366,7 @@ await test("sync uploads the same usage on every run, exits 0 when superseded an
 
     assert.equal(refused.status, 4);
 
-    for (const output of [first, second, dryRun, superseded, refused])
+    for (const output of [first, second, dryRun, rescanned, superseded, refused])
       assert.doesNotMatch(output.stdout + output.stderr, new RegExp(token));
   } finally {
     server.close();

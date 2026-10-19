@@ -717,13 +717,14 @@ the last 30 days; `sync` warns when it is not. Once uploaded, the server keeps t
 long-term record.
 
 Each upload carries the time its scan began, and the server refuses one older than the
-last it stored from this machine, so a slow sync cannot overwrite a newer one. `sync`
-then says the upload was superseded by a newer sync from this machine and exits `0`:
-the server already holds the newer usage.
+last it stored from this machine, so a slow sync cannot overwrite a newer one. The newer
+upload may cover another window or tools, so `sync` then scans the same window again and
+sends it once more; if that is refused too, it says so and exits `7`.
 
-Exit codes: `0` synced or superseded, `1` invalid input or settings, `2` refused by `--strict`,
+Exit codes: `0` synced, `1` invalid input or settings, `2` refused by `--strict`,
 `3` server unreachable or temporarily failing (retry later), `4` token or machine
-refused, `5` unsupported payload version (upgrade token-ledger), `6` payload rejected.
+refused, `5` unsupported payload version (upgrade token-ledger), `6` payload rejected,
+`7` superseded twice by newer syncs from this machine (run it again).
 
 ## Accuracy and limitations
 
