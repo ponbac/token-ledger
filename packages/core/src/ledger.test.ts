@@ -1165,6 +1165,41 @@ describe("Ledger sync payloads through the public interface", () => {
     }).pipe(Effect.provide(runtime)),
   );
 
+  it.effect("keeps separate requests whose inference events share a non-request span", () =>
+    Effect.gen(function* () {
+      const { write, root, path } = yield* fixture();
+      const endTime = [Date.parse("2026-09-22T10:05:00Z") / 1000, 0];
+
+      const event = (responseId: string) =>
+        JSON.stringify({
+          hrTime: endTime,
+          spanContext: { traceId: "trace", spanId: "agent" },
+          attributes: {
+            "event.name": "gen_ai.client.inference.operation.details",
+            "gen_ai.operation.name": "chat",
+            "gen_ai.response.model": "test-model",
+            "gen_ai.response.id": responseId,
+            "gen_ai.usage.input_tokens": 100,
+            "gen_ai.usage.output_tokens": 20,
+          },
+        });
+
+      yield* write("otel/logs.jsonl", [event("first"), event("second")]);
+      const ledger = yield* Ledger;
+
+      const payload = yield* ledger.syncPayload(
+        request([{ provider: "copilot", path: path.join(root, "otel") }]),
+        client,
+      );
+
+      assert.deepStrictEqual(
+        payload.buckets.map((bucket) => bucket.records),
+        [2],
+      );
+      assert.strictEqual(payload.coverage[0]?.duplicates, 0);
+    }).pipe(Effect.provide(runtime)),
+  );
+
   it.effect(
     "keeps stored Copilot usage for broken hints while syncing other providers and reporting normally",
     () =>

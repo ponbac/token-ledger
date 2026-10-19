@@ -180,22 +180,22 @@ export function copilotParser(
       return empty;
     },
     finish() {
-      // A request span and its inference event share a span key, but either may lack the
-      // response ID. Both take the key's ID, the span's first, so the request counts once.
-      const responses = new Map<string, string>();
+      // A request span may lack the response ID its inference event carries. It takes the
+      // ID when exactly one event shares its span key, so the request counts once. Events keep
+      // their own IDs: separate requests can log events under one non-request span.
+      const eventResponses = new Map<string, Set<string>>();
 
       for (const { spanKey, responseId, isSpan } of candidates)
-        if (
-          spanKey !== undefined &&
-          responseId !== undefined &&
-          (isSpan || !responses.has(spanKey))
-        )
-          responses.set(spanKey, responseId);
+        if (!isSpan && spanKey !== undefined && responseId !== undefined)
+          eventResponses.set(spanKey, (eventResponses.get(spanKey) ?? new Set()).add(responseId));
 
       const identified = candidates.map((candidate): Candidate => {
-        const responseId =
-          (candidate.spanKey === undefined ? undefined : responses.get(candidate.spanKey)) ??
-          candidate.responseId;
+        const shared =
+          candidate.isSpan && candidate.responseId === undefined && candidate.spanKey !== undefined
+            ? eventResponses.get(candidate.spanKey)
+            : undefined;
+
+        const responseId = shared?.size === 1 ? [...shared][0] : candidate.responseId;
 
         if (responseId === undefined) return candidate;
         const record = { ...candidate.record, id: `response:${responseId}` };
