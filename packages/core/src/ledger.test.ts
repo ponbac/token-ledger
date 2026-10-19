@@ -2,7 +2,8 @@ import { DatabaseSync } from "node:sqlite";
 
 import { NodeServices } from "@effect/platform-node";
 import { assert, describe, it } from "@effect/vitest";
-import { DateTime, Effect, FileSystem, Layer, Path, Result, Schema } from "effect";
+import { Clock, DateTime, Effect, FileSystem, Layer, Path, Result, Schema } from "effect";
+import { TestClock } from "effect/testing";
 
 import { Ledger } from "./ledger.ts";
 import { PriceBook, ReportRequest, UsageReport, totalTokens, type Source } from "./model.ts";
@@ -1271,6 +1272,29 @@ describe("Ledger sync payloads through the public interface", () => {
         );
         assert.strictEqual((yield* ledger.syncPayload(input, client)).version, 2);
       }).pipe(Effect.provide(runtime)),
+  );
+
+  it.effect("stamps a payload with the time its scan began, however long the scan takes", () =>
+    Effect.gen(function* () {
+      const { write, root, path } = yield* fixture();
+      const copilot = yield* write("otel/events.jsonl", [inference("request")]);
+      const ledger = yield* Ledger;
+      const began = Date.parse("2026-09-22T12:00:00Z");
+      yield* TestClock.setTime(began);
+
+      // Missing required hints warn once the scan has started; the warning lets an hour pass.
+      const payload = yield* ledger.syncPayload(
+        {
+          ...request([{ provider: "copilot", path: copilot }]),
+          billingHints: { directory: path.join(root, "hints"), required: true },
+        },
+        client,
+        () => TestClock.adjust("1 hour"),
+      );
+
+      assert.strictEqual(yield* Clock.currentTimeMillis, began + 3_600_000);
+      assert.strictEqual(payload.snapshotAt, new Date(began).toISOString());
+    }).pipe(Effect.provide(runtime)),
   );
 
   it.effect("uploads hourly session buckets without local paths or raw session IDs", () =>

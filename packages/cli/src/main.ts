@@ -24,6 +24,7 @@ import {
   Match,
   Option,
   Path,
+  Predicate,
   Result,
   Schema,
 } from "effect";
@@ -543,7 +544,15 @@ const sync = Command.make(
 
     if (Result.isFailure(outcome)) {
       yield* Console.error(outcome.failure.message);
+
+      if (Predicate.isTagged(outcome.failure, "SyncSuperseded") && sent.since < request.since)
+        yield* Console.error(
+          `This upload also held the history from ${sent.since}; unless the newer sync did too, send it with --since ${sent.since}.`,
+        );
+
       process.exitCode = Match.value(outcome.failure).pipe(
+        // The server holds a newer scan of this machine, so a scheduled run has not failed.
+        Match.tag("SyncSuperseded", () => 0),
         Match.tag("SyncUnreachable", () => 3),
         Match.tag("SyncUnauthorized", () => 4),
         Match.tag("SyncUnsupportedVersion", () => 5),

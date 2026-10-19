@@ -19,6 +19,14 @@ export class SyncUnsupportedVersion extends Schema.TaggedError<SyncUnsupportedVe
   { message: Schema.String },
 ) {}
 
+/**
+ * The server already applied an upload from this machine whose scan began later (409), so this
+ * one's older snapshot was not stored. The usage the server keeps is newer; nothing failed.
+ */
+export class SyncSuperseded extends Schema.TaggedError<SyncSuperseded>()("SyncSuperseded", {
+  message: Schema.String,
+}) {}
+
 /** The server rejected the payload or failed to store it. */
 export class SyncRejected extends Schema.TaggedError<SyncRejected>()("SyncRejected", {
   status: Schema.Number,
@@ -80,6 +88,14 @@ const readResponse = Effect.fn("Sync.readResponse")(function* (
         }),
       ),
     ),
+    Match.when(409, () =>
+      Effect.fail(
+        new SyncSuperseded({
+          message:
+            "Not stored: superseded by a newer sync from this machine, which the server keeps. If every sync says this, check this machine's clock.",
+        }),
+      ),
+    ),
     Match.when(422, () =>
       HttpClientResponse.schemaBodyJson(VersionRejection)(response).pipe(
         Effect.mapError(
@@ -108,8 +124,8 @@ const readResponse = Effect.fn("Sync.readResponse")(function* (
 /**
  * PUTs a payload to toki2 and returns the number of buckets it stored, when reported. Each
  * attempt owns its response and has a timeout covering both headers and body. The server
- * replaces the payload's window, so retrying transient failures is safe. Errors never
- * contain the token.
+ * replaces the payload's window, so retrying transient failures is safe; refusals, a
+ * superseded snapshot included, are final. Errors never contain the token.
  */
 export const upload = Effect.fn("Sync.upload")(function* (
   server: URL,

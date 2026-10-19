@@ -144,17 +144,19 @@ describe("upload", () => {
     }),
   );
 
-  it.effect("classifies refusals so each maps to its own exit code", () =>
+  it.effect("classifies refusals, without retrying them, so each maps to its own exit code", () =>
     Effect.gen(function* () {
       for (const [response, tag] of [
         [new Response(null, { status: 401 }), "SyncUnauthorized"],
         [new Response(null, { status: 403 }), "SyncUnauthorized"],
+        // A newer snapshot from this machine is stored; resending this one cannot succeed.
+        [Response.json({}, { status: 409 }), "SyncSuperseded"],
         [Response.json({ supportedVersions: [2] }, { status: 422 }), "SyncUnsupportedVersion"],
         [Response.json({ supportedVersions: [1] }, { status: 422 }), "SyncRejected"],
         [new Response(null, { status: 422 }), "SyncRejected"],
         [new Response(null, { status: 400 }), "SyncRejected"],
       ] as const) {
-        const { client } = server(() => response.clone());
+        const { client, requests } = server(() => response.clone());
 
         const result = yield* upload(new URL("https://toki.example"), token, payload).pipe(
           Effect.provideService(HttpClient.HttpClient, client),
@@ -162,6 +164,7 @@ describe("upload", () => {
         );
 
         assert.isTrue(Result.isFailure(result) && Predicate.isTagged(result.failure, tag), tag);
+        assert.strictEqual(requests.length, 1, tag);
         assert.notInclude(JSON.stringify(result), "toki_fixture");
       }
     }),

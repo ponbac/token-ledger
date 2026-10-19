@@ -209,7 +209,7 @@ await test("npm artifact installs offline and exports reports with correct cover
   }
 });
 
-await test("sync uploads an identical payload on every run and exits 4 when refused", async () => {
+await test("sync uploads the same usage on every run, exits 0 when superseded and 4 when refused", async () => {
   const directory = mkdtempSync(join(tmpdir(), "token-ledger-sync-"));
   const token = "toki_fixture_secret";
   /** @type {{ method: string | undefined; url: string | undefined; authorization: string | undefined; body: string }[]} */
@@ -317,7 +317,7 @@ await test("sync uploads an identical payload on every run and exits 4 when refu
     assert.equal(requests[0]?.url, `/ai-usage/machines/${machine.id}/usage`);
     assert.equal(requests[0]?.authorization, `Bearer ${token}`);
 
-    const payload = decodePayload(requests[0]?.body ?? "");
+    const { snapshotAt, ...payload } = decodePayload(requests[0]?.body ?? "");
 
     assert.deepEqual(payload.machine, machine);
     assert.equal(payload.buckets.length, 1);
@@ -326,20 +326,32 @@ await test("sync uploads an identical payload on every run and exits 4 when refu
     const second = await run([]);
 
     assert.equal(second.status, 0, second.stderr);
-    assert.equal(requests[1]?.body, requests[0]?.body);
+    const { snapshotAt: later, ...resent } = decodePayload(requests[1]?.body ?? "");
+    assert.deepEqual(resent, payload);
+    // The server keeps the upload whose scan began last.
+    assert.ok(snapshotAt !== undefined && later !== undefined && later > snapshotAt);
 
     const dryRun = await run(["--dry-run"]);
 
     assert.equal(dryRun.status, 0, dryRun.stderr);
     assert.equal(requests.length, 2);
-    assert.deepEqual(decodePayload(dryRun.stdout), payload);
+    const { snapshotAt: _shown, ...shown } = decodePayload(dryRun.stdout);
+    assert.deepEqual(shown, payload);
+
+    status = 409;
+    const superseded = await run([]);
+
+    assert.equal(superseded.status, 0, superseded.stderr);
+    assert.equal(requests.length, 3);
+    assert.match(superseded.stderr, /superseded by a newer sync from this machine/);
+    assert.doesNotMatch(superseded.stdout, /Synced/);
 
     status = 401;
     const refused = await run([]);
 
     assert.equal(refused.status, 4);
 
-    for (const output of [first, second, dryRun, refused])
+    for (const output of [first, second, dryRun, superseded, refused])
       assert.doesNotMatch(output.stdout + output.stderr, new RegExp(token));
   } finally {
     server.close();

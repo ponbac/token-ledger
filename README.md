@@ -716,7 +716,12 @@ Claude Code deletes transcripts after 30 days by default, so keep `--since` with
 the last 30 days; `sync` warns when it is not. Once uploaded, the server keeps the
 long-term record.
 
-Exit codes: `0` synced, `1` invalid input or settings, `2` refused by `--strict`,
+Each upload carries the time its scan began, and the server refuses one older than the
+last it stored from this machine, so a slow sync cannot overwrite a newer one. `sync`
+then says the upload was superseded by a newer sync from this machine and exits `0`:
+the server already holds the newer usage.
+
+Exit codes: `0` synced or superseded, `1` invalid input or settings, `2` refused by `--strict`,
 `3` server unreachable or temporarily failing (retry later), `4` token or machine
 refused, `5` unsupported payload version (upgrade token-ledger), `6` payload rejected.
 

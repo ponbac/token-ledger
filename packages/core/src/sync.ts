@@ -160,7 +160,8 @@ export function payloadVersion(buckets: readonly SyncBucket[]): SyncPayload["ver
  * provider with `hourStart` in the half-open `window`; other providers keep their stored data.
  * The window is on whole UTC hours, and every bucket and plan hint lies inside it and belongs
  * to a replaced provider. Buckets from different machines are summed. `timeZone` is for display
- * only; all instants are UTC.
+ * only; all instants are UTC. `snapshotAt`, when present, is when the history scan began: the
+ * server refuses an upload older than the last it applied from the machine.
  */
 export const SyncPayload = Schema.Struct({
   version: Schema.Literals([1, 2, 3]),
@@ -180,6 +181,8 @@ export const SyncPayload = Schema.Struct({
   buckets: Schema.Array(SyncBucket),
   coverage: Schema.Array(SyncCoverage),
   providerHints: Schema.optionalKey(Schema.Array(ProviderHint)),
+  // Any version may carry it; servers without the ordering guard ignore it.
+  snapshotAt: Schema.optionalKey(UtcInstant),
 }).check(
   Schema.makeFilter(
     (payload) =>
