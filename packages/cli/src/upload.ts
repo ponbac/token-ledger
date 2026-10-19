@@ -13,7 +13,7 @@ export class SyncUnauthorized extends Schema.TaggedError<SyncUnauthorized>()("Sy
   message: Schema.String,
 }) {}
 
-/** The server does not accept this payload version; token-ledger must be upgraded. */
+/** The server and client need compatible payload versions. */
 export class SyncUnsupportedVersion extends Schema.TaggedError<SyncUnsupportedVersion>()(
   "SyncUnsupportedVersion",
   { message: Schema.String },
@@ -91,7 +91,7 @@ const readResponse = Effect.fn("Sync.readResponse")(function* (
             rejection.supportedVersions.includes(version)
               ? new SyncRejected({ status, message: `The server rejected the upload (${status}).` })
               : new SyncUnsupportedVersion({
-                  message: `The server accepts payload versions ${rejection.supportedVersions.join(", ") || "none"}, not ${version}; upgrade token-ledger.`,
+                  message: `The server accepts payload versions ${rejection.supportedVersions.join(", ") || "none"}, not ${version}; update Toki or use a compatible token-ledger version.`,
                 }),
           ),
         ),

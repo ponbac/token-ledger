@@ -26,6 +26,8 @@ export interface ScheduledSync {
    * the settings `login` saved even when the scheduler's environment lacks the variable.
    */
   readonly configHome: Option.Option<string>;
+  /** XDG data root used by the optional local billing hint discovery. */
+  readonly dataHome: Option.Option<string>;
   /** Flags forwarded to `sync`. */
   readonly flags: ReadonlyArray<string>;
 }
@@ -92,9 +94,12 @@ function quotable(
   forbidden: RegExp,
   described: string,
 ): Effect.Effect<ScheduledSync, ScheduleError, never> {
-  const offending = [job.nodeDirectory, ...Option.toArray(job.configHome), ...job.flags].find(
-    (value) => forbidden.test(value),
-  );
+  const offending = [
+    job.nodeDirectory,
+    ...Option.toArray(job.configHome),
+    ...Option.toArray(job.dataHome),
+    ...job.flags,
+  ].find((value) => forbidden.test(value));
 
   return offending === undefined
     ? Effect.succeed(job)
@@ -121,6 +126,9 @@ const posixScript = (job: ScheduledSync) =>
     "cd /",
     ...Option.toArray(job.configHome).map(
       (directory) => `export XDG_CONFIG_HOME=${posixWord(directory)}`,
+    ),
+    ...Option.toArray(job.dataHome).map(
+      (directory) => `export XDG_DATA_HOME=${posixWord(directory)}`,
     ),
     `export PATH=${posixWord(job.nodeDirectory)}:"$PATH"`,
     `exec npx --yes ${packageSpec} ${["sync", ...job.flags].map(posixWord).join(" ")}`,

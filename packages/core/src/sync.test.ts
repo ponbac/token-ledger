@@ -134,6 +134,15 @@ it("only builds payloads the server can store", () => {
 
   const valid = Schema.is(SyncPayload);
   assert.isTrue(valid(payload));
+  const routed = Object.assign({}, bucket, { billingProvider: "claude" });
+  assert.isTrue(valid({ ...payload, version: 2, buckets: [bucket, routed] }));
+  assert.isFalse(valid({ ...payload, buckets: [routed] }));
+
+  for (const billingProvider of ["codex", "pi", "unknown"])
+    assert.isFalse(
+      valid({ ...payload, version: 2, buckets: [Object.assign({}, bucket, { billingProvider })] }),
+    );
+
   const hint = { provider: "codex", hourStart: "2026-09-22T10:00:00.000Z", plan: "pro" };
   assert.isTrue(valid({ ...payload, providerHints: [hint] }));
 

@@ -1,8 +1,16 @@
-# Sync payload, version 1
+# Sync payload, versions 1 and 2
 
 The contract between `token-ledger sync` and the toki2 ingest endpoint. The Effect
 Schema `SyncPayload` in [`packages/core/src/sync.ts`](../packages/core/src/sync.ts) is
 authoritative; this page explains it. Figures are API-equivalent estimates, not bills.
+
+Version 2 adds an optional `billingProvider` to each bucket. It names a different
+subscription provider (`codex`, `claude`, `grok`, or `copilot`); Pi cannot be a payer.
+The source `provider` remains unchanged. The bucket key additionally includes
+`billingProvider` (absent means native routing), allowing different payers in the
+same hour, session, project and model. Coverage and replacement still use the source
+provider. Version 1 cannot carry billing overrides. Clients send version 2 only when
+at least one uploaded bucket has an override. See [local billing hints](billing-hints.md).
 
 ## Request
 
@@ -60,25 +68,25 @@ A synthetic example:
 }
 ```
 
-| Field              | Meaning                                                                                                                     |
-| ------------------ | --------------------------------------------------------------------------------------------------------------------------- |
-| `version`          | Always `1`. Reject other versions.                                                                                          |
-| `machine.id`       | Random UUID created once per installation.                                                                                  |
-| `machine.label`    | Editable display name, usually the host name.                                                                               |
-| `clientVersion`    | token-ledger version, for diagnostics.                                                                                      |
-| `timeZone`         | The client's IANA zone, for display and debugging only. Every instant is UTC.                                               |
-| `window`           | Half-open `[start, end)` on whole UTC hours: the client's local days, widened outward to whole hours.                       |
-| `pricing`          | Provenance of the rates behind every `estimatedCostUsd`.                                                                    |
-| `buckets[]`        | Usage keyed by `(hourStart, sessionKey, project, provider, model)`; each key occurs at most once. Only replaced providers.  |
-| `hourStart`        | Start of a whole UTC hour inside `window`.                                                                                  |
-| `sessionKey`       | 32 hex characters: a truncated SHA-256 of provider and session. Opaque; stable across syncs from one machine.               |
-| `project`          | Project key; see below.                                                                                                     |
-| `tokens`           | Disjoint counts: `input` excludes cache reads and writes; reasoning is inside `output`.                                     |
-| `records`          | Deduplicated provider requests in the bucket; at least 1.                                                                   |
-| `estimatedCostUsd` | API-equivalent USD, or `null` when any record in the bucket could not be priced. `null` is unknown, never zero.             |
-| `unpricedRecords`  | Records without a known price.                                                                                              |
-| `coverage[]`       | One entry per scanned provider, with file and diagnostic counts; `status` decides replacement (below).                      |
-| `providerHints[]`  | Optional `{ provider, hourStart, plan }` evidence of a billing plan, such as Codex `plan_type`. Declared subscriptions win. |
+| Field              | Meaning                                                                                                                                     |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `version`          | `1` without overrides; `2` supports `billingProvider`. Reject unsupported versions.                                                         |
+| `machine.id`       | Random UUID created once per installation.                                                                                                  |
+| `machine.label`    | Editable display name, usually the host name.                                                                                               |
+| `clientVersion`    | token-ledger version, for diagnostics.                                                                                                      |
+| `timeZone`         | The client's IANA zone, for display and debugging only. Every instant is UTC.                                                               |
+| `window`           | Half-open `[start, end)` on whole UTC hours: the client's local days, widened outward to whole hours.                                       |
+| `pricing`          | Provenance of the rates behind every `estimatedCostUsd`.                                                                                    |
+| `buckets[]`        | Usage keyed by `(hourStart, sessionKey, project, provider, model, billingProvider)`; each key occurs at most once. Only replaced providers. |
+| `hourStart`        | Start of a whole UTC hour inside `window`.                                                                                                  |
+| `sessionKey`       | 32 hex characters: a truncated SHA-256 of provider and session. Opaque; stable across syncs from one machine.                               |
+| `project`          | Project key; see below.                                                                                                                     |
+| `tokens`           | Disjoint counts: `input` excludes cache reads and writes; reasoning is inside `output`.                                                     |
+| `records`          | Deduplicated provider requests in the bucket; at least 1.                                                                                   |
+| `estimatedCostUsd` | API-equivalent USD, or `null` when any record in the bucket could not be priced. `null` is unknown, never zero.                             |
+| `unpricedRecords`  | Records without a known price.                                                                                                              |
+| `coverage[]`       | One entry per scanned provider, with file and diagnostic counts; `status` decides replacement (below).                                      |
+| `providerHints[]`  | Optional `{ provider, hourStart, plan }` evidence of a billing plan, such as Codex `plan_type`. Declared subscriptions win.                 |
 
 ## Plan hints
 

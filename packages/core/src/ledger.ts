@@ -15,6 +15,7 @@ import {
 } from "effect";
 
 import { dayWindow } from "./calendar.ts";
+import { readBillingHints } from "./billing-hints.ts";
 import {
   type Coverage,
   type Day,
@@ -72,6 +73,9 @@ export interface HistoryPayload {
   readonly since: Day;
 }
 
+/** Local diagnostics for the calling application; never part of the upload payload. */
+type WarningSink = (message: string) => Effect.Effect<void>;
+
 /** Produces complete or explicitly partial reports, hiding scanning and provider-specific accounting. */
 export class Ledger extends Context.Service<
   Ledger,
@@ -81,6 +85,7 @@ export class Ledger extends Context.Service<
     readonly syncPayload: (
       request: ReportRequest,
       client: SyncClient,
+      onWarning?: WarningSink,
     ) => Effect.Effect<SyncPayload, InvalidRequest>;
     /**
      * As `syncPayload`, with the window begun early enough to hold all usage found before
@@ -91,6 +96,7 @@ export class Ledger extends Context.Service<
     readonly historyPayload: (
       request: ReportRequest,
       client: SyncClient,
+      onWarning?: WarningSink,
     ) => Effect.Effect<HistoryPayload, InvalidRequest>;
   }
 >()("token-ledger/Ledger") {
@@ -113,13 +119,15 @@ export class Ledger extends Context.Service<
         );
 
         if (
+          (request.billingHints !== undefined &&
+            !path.isAbsolute(request.billingHints.directory)) ||
           request.sources.some((source) => !path.isAbsolute(source.path)) ||
           request.projects.some((mapping) =>
             mapping.paths.some((prefix) => !path.isAbsolute(prefix)),
           )
         ) {
           return yield* new InvalidRequest({
-            message: "Source and project mapping paths must be absolute.",
+            message: "Source, billing hint, and project mapping paths must be absolute.",
           });
         }
 
@@ -137,7 +145,28 @@ export class Ledger extends Context.Service<
         locate: (timestamp: number) => Slot | undefined,
         collect: (record: UsageRecord, attribution: Attribution, slot: Slot) => void,
         notice?: (plan: ObservedPlan) => void,
+        onWarning?: WarningSink,
       ) {
+        const hints = yield* (
+          notice !== undefined &&
+          request.billingHints !== undefined &&
+          request.sources.some((source) => source.provider === "copilot")
+            ? readBillingHints(request.billingHints).pipe(
+                Effect.provideService(FileSystem.FileSystem, fs),
+                Effect.provideService(Path.Path, path),
+              )
+            : Effect.succeed(new Set<string>())
+        ).pipe(Effect.result);
+
+        const chatgptRequests = Result.isSuccess(hints) ? hints.success : new Set<string>();
+
+        if (Result.isFailure(hints))
+          yield* (
+            onWarning?.(
+              `Billing hints: ${hints.failure.message} Copilot will not be uploaded. Repair the hints and rerun sync with --since <first missed day>.`,
+            ) ?? Effect.void
+          );
+
         const resolveProject = yield* projectResolver(request.projects).pipe(
           Effect.provideService(FileSystem.FileSystem, fs),
           Effect.provideService(Path.Path, path),
@@ -162,7 +191,8 @@ export class Ledger extends Context.Service<
           let missingRoot = false;
           const warnings = new Set<string>();
 
-          const copilot = source.provider === "copilot" ? copilotParser(source.path) : undefined;
+          const copilot =
+            source.provider === "copilot" ? copilotParser(source.path, chatgptRequests) : undefined;
 
           const place = Effect.fn("Ledger.placeRecord")(function* (
             record: UsageRecord,
@@ -301,13 +331,20 @@ export class Ledger extends Context.Service<
 
           if (copilot?.finish !== undefined) yield* accept(copilot.finish());
 
-          const status = missingRoot
-            ? "missing"
-            : failedFiles > 0 && files === 0
-              ? "failed"
-              : failedFiles > 0 || malformedLines > 0 || skippedRecords > 0
-                ? "partial"
-                : "ok";
+          const hintsFailed = source.provider === "copilot" && Result.isFailure(hints);
+
+          if (hintsFailed)
+            warnings.add("Billing hints could not be read; stored Copilot usage will be kept.");
+
+          const status = hintsFailed
+            ? "failed"
+            : missingRoot
+              ? "missing"
+              : failedFiles > 0 && files === 0
+                ? "failed"
+                : failedFiles > 0 || malformedLines > 0 || skippedRecords > 0
+                  ? "partial"
+                  : "ok";
 
           coverage.push(() => ({
             provider: source.provider,
@@ -315,7 +352,7 @@ export class Ledger extends Context.Service<
             status,
             files,
             filesBeforeWindow,
-            unreadable: missingRoot ? 0 : failedFiles,
+            unreadable: (missingRoot ? 0 : failedFiles) + (hintsFailed ? 1 : 0),
             malformedLines,
             skippedRecords,
             duplicates,
@@ -379,6 +416,7 @@ export class Ledger extends Context.Service<
         input: ReportRequest,
         clientInput: SyncClient,
         history: boolean,
+        onWarning?: WarningSink,
       ) {
         const request = yield* decode(input);
 
@@ -411,6 +449,7 @@ export class Ledger extends Context.Service<
             earliest = Math.min(earliest, plan.timestamp);
             hints.add(plan);
           },
+          onWarning,
         );
 
         const since =
@@ -427,9 +466,10 @@ export class Ledger extends Context.Service<
 
         const summary = providerCoverage(coverage);
         const replaced = replacedProviders(summary);
+        const uploadedBuckets = buckets.finish().filter((bucket) => replaced.has(bucket.provider));
 
         const payload = yield* SyncPayload.makeEffect({
-          version: 1,
+          version: uploadedBuckets.some((bucket) => bucket.billingProvider !== undefined) ? 2 : 1,
           machine: client.machine,
           clientVersion: client.version,
           timeZone: request.timeZone.id,
@@ -445,7 +485,7 @@ export class Ledger extends Context.Service<
             source: request.pricing.source,
           },
           // Unread history must not replace stored usage with less; drop those providers.
-          buckets: buckets.finish().filter((bucket) => replaced.has(bucket.provider)),
+          buckets: uploadedBuckets,
           coverage: summary,
           providerHints: hints.finish().filter((hint) => replaced.has(hint.provider)),
         }).pipe(
@@ -462,9 +502,10 @@ export class Ledger extends Context.Service<
 
       return Ledger.of({
         report,
-        syncPayload: (request, client) =>
-          Effect.map(payloadFrom(request, client, false), ({ payload }) => payload),
-        historyPayload: (request, client) => payloadFrom(request, client, true),
+        syncPayload: (request, client, onWarning) =>
+          Effect.map(payloadFrom(request, client, false, onWarning), ({ payload }) => payload),
+        historyPayload: (request, client, onWarning) =>
+          payloadFrom(request, client, true, onWarning),
       });
     }),
   );

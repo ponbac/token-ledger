@@ -3,7 +3,14 @@ import { createHash } from "node:crypto";
 import { Schema } from "effect";
 
 import type { InstantRange } from "./calendar.ts";
-import { Coverage, PriceBook, Provider, Tokens, type UsageRecord } from "./model.ts";
+import {
+  BillingProvider,
+  Coverage,
+  PriceBook,
+  Provider,
+  Tokens,
+  type UsageRecord,
+} from "./model.ts";
 import { type UsageTotals, addUsage, lookupPrice, priceTokens } from "./pricing.ts";
 
 const hour = 3_600_000;
@@ -63,6 +70,7 @@ const Cost = Schema.Number.check(Schema.isFinite(), Schema.isGreaterThanOrEqualT
 
 /** One session's usage of one model during one UTC hour. Null cost means some records are unpriced. */
 export const SyncBucket = Schema.Struct({
+  billingProvider: Schema.optionalKey(BillingProvider),
   hourStart: UtcHour,
   sessionKey: SessionKey,
   project: NonEmptyText,
@@ -75,12 +83,13 @@ export const SyncBucket = Schema.Struct({
 }).check(
   Schema.makeFilter(
     (bucket) =>
+      bucket.billingProvider !== bucket.provider &&
       bucket.unpricedRecords <= bucket.records &&
       (bucket.estimatedCostUsd === null) === bucket.unpricedRecords > 0,
   ),
 );
 
-/** Aggregated usage; the key is `(hourStart, sessionKey, project, provider, model)`. */
+/** Aggregated usage; the key is `(hourStart, sessionKey, project, provider, model, billingProvider)`. */
 export interface SyncBucket extends Schema.Schema.Type<typeof SyncBucket> {}
 
 /**
@@ -127,7 +136,7 @@ export const ProviderHint = Schema.Struct({
 export interface ProviderHint extends Schema.Schema.Type<typeof ProviderHint> {}
 
 /**
- * Version 1 upload for `PUT /ai-usage/machines/{machineId}/usage`. For each provider whose
+ * Version 1 or 2 upload for `PUT /ai-usage/machines/{machineId}/usage`. For each provider whose
  * coverage is `ok` or `partial`, the server replaces the machine's stored buckets for that
  * provider with `hourStart` in the half-open `window`; other providers keep their stored data.
  * The window is on whole UTC hours, and every bucket and plan hint lies inside it and belongs
@@ -135,7 +144,7 @@ export interface ProviderHint extends Schema.Schema.Type<typeof ProviderHint> {}
  * only; all instants are UTC.
  */
 export const SyncPayload = Schema.Struct({
-  version: Schema.Literal(1),
+  version: Schema.Literals([1, 2]),
   machine: SyncMachine,
   clientVersion: NonEmptyText,
   timeZone: NonEmptyText,
@@ -155,12 +164,15 @@ export const SyncPayload = Schema.Struct({
 }).check(
   Schema.makeFilter(
     (payload) =>
+      (payload.version === 2 ||
+        payload.buckets.every((bucket) => bucket.billingProvider === undefined)) &&
       distinct(payload.buckets, (bucket) =>
         JSON.stringify([
           bucket.hourStart,
           bucket.sessionKey,
           bucket.project,
           bucket.provider,
+          bucket.billingProvider ?? null,
           bucket.model,
         ]),
       ) &&
@@ -233,7 +245,15 @@ export function sessionBuckets(pricing: PriceBook) {
       const hourStart = Math.floor(record.timestamp / hour) * hour;
       const project = storable(name);
       const model = storable(record.model);
-      const key = JSON.stringify([hourStart, record.provider, record.session, project, model]);
+
+      const key = JSON.stringify([
+        hourStart,
+        record.provider,
+        record.billingProvider ?? null,
+        record.session,
+        project,
+        model,
+      ]);
 
       const previous = totals.get(key);
       const cost = priceTokens(record.tokens, lookupPrice(pricing, record.model));
@@ -248,24 +268,31 @@ export function sessionBuckets(pricing: PriceBook) {
     },
     finish(): SyncBucket[] {
       return [...totals.values()]
-        .map(({ record, project, model, hourStart, usage }): SyncBucket => ({
-          hourStart: new Date(hourStart).toISOString(),
-          sessionKey: sessionKey(record.provider, record.session),
-          project,
-          provider: record.provider,
-          model,
-          tokens: usage.tokens,
-          records: usage.records,
-          estimatedCostUsd: usage.estimatedCostUsd,
-          unpricedRecords: usage.unpricedRecords,
-        }))
+        .map(({ record, project, model, hourStart, usage }): SyncBucket => {
+          const bucket = {
+            hourStart: new Date(hourStart).toISOString(),
+            sessionKey: sessionKey(record.provider, record.session),
+            project,
+            provider: record.provider,
+            model,
+            tokens: usage.tokens,
+            records: usage.records,
+            estimatedCostUsd: usage.estimatedCostUsd,
+            unpricedRecords: usage.unpricedRecords,
+          };
+
+          return record.billingProvider === undefined
+            ? bucket
+            : { ...bucket, billingProvider: record.billingProvider };
+        })
         .toSorted(
           (a, b) =>
             a.hourStart.localeCompare(b.hourStart) ||
             a.provider.localeCompare(b.provider) ||
             a.sessionKey.localeCompare(b.sessionKey) ||
             a.project.localeCompare(b.project) ||
-            a.model.localeCompare(b.model),
+            a.model.localeCompare(b.model) ||
+            (a.billingProvider ?? "").localeCompare(b.billingProvider ?? ""),
         );
     },
   };

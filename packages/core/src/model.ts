@@ -3,6 +3,9 @@ import { Data, Schema } from "effect";
 /** Supported local histories and Copilot CLI / VS Code Chat telemetry exports. */
 export const Provider = Schema.Literals(["codex", "claude", "grok", "copilot", "pi"]);
 
+/** Providers for which a user can declare a subscription. */
+export const BillingProvider = Schema.Literals(["codex", "claude", "grok", "copilot"]);
+
 /** A provider's local history format. */
 export type Provider = typeof Provider.Type;
 
@@ -55,6 +58,7 @@ export interface ModelPrice extends Schema.Schema.Type<typeof ModelPrice> {}
 
 /** Optional source overrides replace auto-discovery; project mappings and prices are additive. */
 export const Configuration = Schema.Struct({
+  billingHintsDirectory: Schema.optionalKey(Schema.NonEmptyString),
   sources: Schema.optionalKey(Schema.Array(Source)),
   projects: Schema.optionalKey(Schema.Array(ProjectMapping)),
   prices: Schema.optionalKey(Schema.Record(Schema.String, ModelPrice)),
@@ -86,6 +90,7 @@ export const RepositoryReference = Data.taggedEnum<RepositoryReference>();
 /** One decoded observation; identifiers only, never prompts or responses. */
 export interface UsageRecord {
   readonly provider: Provider;
+  readonly billingProvider?: typeof BillingProvider.Type;
   readonly id: string;
   readonly session: string;
   readonly timestamp: number;
@@ -110,6 +115,9 @@ export type Day = typeof Day.Type;
 
 /** Inclusive local calendar days in a named time zone and all inputs to a report. Paths must be absolute. */
 export const ReportRequest = Schema.Struct({
+  billingHints: Schema.optionalKey(
+    Schema.Struct({ directory: Schema.NonEmptyString, required: Schema.Boolean }),
+  ),
   since: Day,
   until: Day,
   timeZone: Schema.TimeZoneNamed,

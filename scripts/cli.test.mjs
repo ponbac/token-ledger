@@ -15,7 +15,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { Schema } from "effect";
+import { Match, Schema } from "effect";
 
 import { UsageReport } from "../packages/core/src/model.ts";
 import { SyncMachine, SyncPayload } from "../packages/core/src/sync.ts";
@@ -868,6 +868,127 @@ await test("copilot enable sets the export up once, and reports then read both e
 
     writeFileSync(elsewhere, inference("elsewhere"));
     assert.deepEqual(read(elsewhere), { records: 1, sources: [[elsewhere, "ok", 1]] });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+await test("packaged sync discovers local proxy hints and resolves configured paths from the config file", () => {
+  const directory = mkdtempSync(join(tmpdir(), "token-ledger-hints-"));
+
+  try {
+    const source = join(directory, "otel.jsonl");
+    const configuration = join(directory, "token-ledger.json");
+    const localData = join(directory, "local-data");
+    const xdgData = join(directory, "xdg-data");
+
+    const hintRoot = Match.value(process.platform).pipe(
+      Match.when("win32", () => localData),
+      Match.when("darwin", () => join(directory, "Library", "Application Support")),
+      Match.orElse(() => xdgData),
+    );
+
+    const hints = join(hintRoot, "token-ledger", "billing-hints");
+
+    const hint = JSON.stringify({
+      requestId: "local-request",
+      billingProvider: "codex",
+      authMode: "chatgpt",
+    });
+
+    writeFileSync(
+      source,
+      JSON.stringify({
+        traceId: "trace",
+        spanId: "span",
+        endTime: [Date.parse("2026-09-22T12:00:00Z") / 1000, 0],
+        attributes: {
+          "gen_ai.operation.name": "chat",
+          "gen_ai.response.id": "local-request",
+          "gen_ai.response.model": "fixture-model",
+          "gen_ai.usage.input_tokens": 100,
+          "gen_ai.usage.output_tokens": 20,
+        },
+      }) + "\n",
+    );
+    const config = { sources: [{ provider: "copilot", path: source }] };
+
+    writeFileSync(configuration, JSON.stringify(config));
+    const { TOKEN_LEDGER_SERVER: _server, TOKI_API_TOKEN: _token, ...environment } = process.env;
+
+    const run = () =>
+      spawnSync(
+        process.execPath,
+        [
+          join(packageDirectory, "dist/main.js"),
+          "sync",
+          "--config",
+          configuration,
+          "--since",
+          "2026-09-22",
+          "--until",
+          "2026-09-22",
+          "--time-zone",
+          "UTC",
+          "--offline",
+          "--dry-run",
+        ],
+        {
+          cwd: directory,
+          encoding: "utf8",
+          timeout: 30_000,
+          env: {
+            ...environment,
+            HOME: directory,
+            USERPROFILE: directory,
+            LOCALAPPDATA: localData,
+            XDG_DATA_HOME: xdgData,
+            XDG_CONFIG_HOME: join(directory, "config"),
+            XDG_CACHE_HOME: join(directory, "cache"),
+          },
+        },
+      );
+
+    const plain = run();
+
+    assert.equal(plain.status, 0, plain.stderr);
+    assert.equal(decodePayload(plain.stdout).version, 1);
+    mkdirSync(hints, { recursive: true });
+    writeFileSync(join(hints, "chatgpt-proxy.jsonl"), hint + "\n");
+    const discovered = run();
+
+    assert.equal(discovered.status, 0, discovered.stderr);
+    assert.equal(decodePayload(discovered.stdout).version, 2);
+    assert.equal(decodePayload(discovered.stdout).buckets[0]?.billingProvider, "codex");
+    assert.doesNotMatch(discovered.stdout, /local-request|requestId|authMode/);
+
+    mkdirSync(join(directory, "custom"));
+    writeFileSync(join(directory, "custom", "proxy.jsonl"), hint + "\n");
+    writeFileSync(configuration, JSON.stringify({ ...config, billingHintsDirectory: "custom" }));
+    const configured = run();
+
+    assert.equal(configured.status, 0, configured.stderr);
+    assert.equal(decodePayload(configured.stdout).buckets[0]?.billingProvider, "codex");
+    writeFileSync(join(directory, "custom", "proxy.jsonl"), hint + '\n{"truncated\n' + hint + "\n");
+    const broken = run();
+
+    assert.equal(broken.status, 0, broken.stderr);
+    assert.equal(decodePayload(broken.stdout).coverage[0]?.status, "failed");
+    assert.match(broken.stderr, /Billing hints: Invalid row in "proxy.jsonl" at line 2/);
+    assert.match(broken.stderr, /--since <first missed day>/);
+    assert.doesNotMatch(broken.stderr, /local-request|truncated/);
+    writeFileSync(join(directory, "custom", "proxy.jsonl"), hint + "\n");
+    const repaired = run();
+
+    assert.equal(repaired.status, 0, repaired.stderr);
+    assert.equal(decodePayload(repaired.stdout).version, 2);
+    writeFileSync(configuration, JSON.stringify({ ...config, billingHintsDirectory: "missing" }));
+    const missing = run();
+
+    assert.equal(missing.status, 0, missing.stderr);
+    assert.equal(decodePayload(missing.stdout).buckets.length, 0);
+    assert.equal(decodePayload(missing.stdout).coverage[0]?.status, "failed");
+    assert.match(missing.stderr, /Billing hints: Cannot read the billing hints directory/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

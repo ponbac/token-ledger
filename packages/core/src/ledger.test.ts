@@ -1016,6 +1016,169 @@ describe("Ledger sync payloads through the public interface", () => {
     ...usage,
   ];
 
+  const inference = (id: string) =>
+    JSON.stringify({
+      traceId: "trace",
+      spanId: id,
+      endTime: [Date.parse("2026-09-22T10:05:00Z") / 1000, 0],
+      attributes: {
+        "gen_ai.operation.name": "chat",
+        "gen_ai.response.id": id,
+        "gen_ai.conversation.id": "private-session",
+        "gen_ai.response.model": "test-model",
+        "gen_ai.usage.input_tokens": 100,
+        "gen_ai.usage.output_tokens": 20,
+      },
+    });
+
+  it.effect("splits mixed Copilot billing by exact request ID without uploading local hints", () =>
+    Effect.gen(function* () {
+      const { write, root, path } = yield* fixture();
+
+      const source = yield* write("otel/events.jsonl", [
+        inference("request-private"),
+        inference("request-private"),
+        inference("ordinary"),
+      ]);
+
+      const hint = JSON.stringify({
+        requestId: "request-private",
+        billingProvider: "codex",
+        authMode: "chatgpt",
+      });
+
+      yield* write("hints/chatgpt-proxy.jsonl", [
+        hint,
+        hint,
+        JSON.stringify({
+          requestId: "upstream-only",
+          billingProvider: "codex",
+          authMode: "chatgpt",
+        }),
+      ]);
+      const ledger = yield* Ledger;
+
+      const input = {
+        ...request([{ provider: "copilot", path: source }]),
+        billingHints: { directory: path.join(root, "hints"), required: false },
+      };
+
+      const payload = yield* ledger.syncPayload(input, client);
+      assert.strictEqual(payload.version, 2);
+      assert.deepStrictEqual(
+        payload.buckets.map((bucket) => [
+          bucket.provider,
+          bucket.billingProvider ?? null,
+          bucket.records,
+          totalTokens(bucket.tokens),
+        ]),
+        [
+          ["copilot", null, 1, 120],
+          ["copilot", "codex", 1, 120],
+        ],
+      );
+      assert.strictEqual(new Set(payload.buckets.map((bucket) => bucket.sessionKey)).size, 1);
+      assert.strictEqual(payload.coverage[0]?.duplicates, 1);
+      const encoded = JSON.stringify(payload);
+
+      for (const local of [
+        "request-private",
+        "upstream-only",
+        "private-session",
+        root,
+        "authMode",
+        "requestId",
+      ])
+        assert.notInclude(encoded, local);
+      assert.deepStrictEqual(
+        (yield* ledger.historyPayload(input, client)).payload.buckets,
+        payload.buckets,
+      );
+
+      const withoutHints = yield* ledger.syncPayload(
+        { ...input, billingHints: { directory: path.join(root, "absent"), required: false } },
+        client,
+      );
+
+      assert.strictEqual(withoutHints.version, 1);
+      assert.strictEqual(withoutHints.buckets[0]?.records, 2);
+      assert.notInclude(JSON.stringify(withoutHints), "billingProvider");
+    }).pipe(Effect.provide(runtime)),
+  );
+
+  it.effect(
+    "keeps stored Copilot usage for broken hints while syncing other providers and reporting normally",
+    () =>
+      Effect.gen(function* () {
+        const { write, root, path, fs } = yield* fixture();
+        const copilot = yield* write("otel/events.jsonl", [inference("request-private")]);
+
+        const codex = yield* write(
+          "codex/session.jsonl",
+          session("codex", root, [codexUsage("10:10:00")]),
+        );
+
+        const ledger = yield* Ledger;
+
+        const input = {
+          ...request([
+            { provider: "copilot", path: copilot },
+            { provider: "codex", path: codex },
+          ]),
+          billingHints: { directory: path.join(root, "hints"), required: true },
+        };
+
+        const broken = [
+          null,
+          '{"requestId":"cut-off',
+          JSON.stringify({
+            requestId: "request-private",
+            billingProvider: "codex",
+            authMode: "api-key",
+          }),
+          JSON.stringify({
+            requestId: "request-private",
+            billingProvider: "claude",
+            authMode: "chatgpt",
+          }),
+        ];
+
+        for (const contents of broken) {
+          if (contents !== null) {
+            yield* fs.makeDirectory(input.billingHints.directory, { recursive: true });
+            yield* fs.writeFileString(
+              path.join(input.billingHints.directory, "proxy.jsonl"),
+              contents,
+            );
+          }
+
+          const payload = yield* ledger.syncPayload(input, client);
+          assert.strictEqual(payload.version, 1);
+          assert.deepStrictEqual(
+            payload.buckets.map((bucket) => bucket.provider),
+            ["codex"],
+          );
+          const coverage = payload.coverage.find((entry) => entry.provider === "copilot");
+          assert.strictEqual(coverage?.status, "failed");
+          assert.strictEqual(coverage?.unreadable, 1);
+          const report = yield* ledger.report(input);
+          assert.strictEqual(report.rows.length, 2);
+          assert.isTrue(report.coverage.every((entry) => entry.status === "ok"));
+        }
+
+        // A complete final line is valid even before the producer appends its newline.
+        yield* fs.writeFileString(
+          path.join(input.billingHints.directory, "proxy.jsonl"),
+          JSON.stringify({
+            requestId: "request-private",
+            billingProvider: "codex",
+            authMode: "chatgpt",
+          }),
+        );
+        assert.strictEqual((yield* ledger.syncPayload(input, client)).version, 2);
+      }).pipe(Effect.provide(runtime)),
+  );
+
   it.effect("uploads hourly session buckets without local paths or raw session IDs", () =>
     Effect.gen(function* () {
       const { write, root, path } = yield* fixture();
