@@ -226,7 +226,7 @@ export function syncSummary(
 
   const cost = payload.buckets.reduce((sum, bucket) => sum + (bucket.estimatedCostUsd ?? 0), 0);
 
-  const unknown = payload.buckets.some((bucket) => bucket.estimatedCostUsd === null);
+  const unknown = payload.buckets.some((bucket) => bucket.unpricedRecords > 0);
 
   return [
     `Synced ${terminalText(payload.machine.label)} · ${request.since} through ${request.until} (${payload.timeZone})`,

@@ -40,6 +40,7 @@ import {
   SyncClient,
   SyncPayload,
   hourRange,
+  payloadVersion,
   planHints,
   providerCoverage,
   replacedProviders,
@@ -469,7 +470,7 @@ export class Ledger extends Context.Service<
         const uploadedBuckets = buckets.finish().filter((bucket) => replaced.has(bucket.provider));
 
         const payload = yield* SyncPayload.makeEffect({
-          version: uploadedBuckets.some((bucket) => bucket.billingProvider !== undefined) ? 2 : 1,
+          version: payloadVersion(uploadedBuckets),
           machine: client.machine,
           clientVersion: client.version,
           timeZone: request.timeZone.id,
