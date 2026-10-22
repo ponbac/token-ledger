@@ -20,6 +20,7 @@ import {
   describe,
   launchAgent,
   perform,
+  powershellArguments,
   systemdTimer,
   taskScheduler,
 } from "./schedule.ts";
@@ -29,6 +30,7 @@ const awkward = `/tmp/my cfg/it's $HOME %h "x" \\ & <b>.json`;
 
 const job: ScheduledSync = {
   at: "07:05",
+  every: 6,
   nodeDirectory: "/opt/node 24/bin",
   configHome: Option.some("/home/me/my config"),
   dataHome: Option.none(),
@@ -107,7 +109,7 @@ suite("systemd user timer", () => {
       );
       assert.include(
         yield* fs.readFileString(path.join(directory, "token-ledger-sync.timer")),
-        "OnCalendar=*-*-* 07:05:00\nPersistent=true\n",
+        "OnCalendar=*-*-* 01,07,13,19:05:00\nPersistent=true\n",
       );
       assert.deepStrictEqual(lines, [
         "systemctl --user daemon-reload",
@@ -116,6 +118,40 @@ suite("systemd user timer", () => {
         "systemctl --user restart token-ledger-sync.timer",
       ]);
     }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("replaces an installed schedule when installed again with another interval", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const directory = yield* fs.makeTempDirectoryScoped();
+      const timer = path.join(directory, "token-ledger-sync.timer");
+      const { lines, spawner } = scheduler(() => 0);
+
+      for (const every of [6, 24, 1] as const)
+        yield* perform(yield* systemdTimer(directory).install({ ...job, every })).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        );
+
+      assert.include(
+        yield* fs.readFileString(timer),
+        `OnCalendar=*-*-* ${Array.from({ length: 24 }, (_, hour) => String(hour).padStart(2, "0")).join(",")}:05:00\n`,
+      );
+      assert.deepStrictEqual((yield* fs.readDirectory(directory)).toSorted(), [
+        "token-ledger-sync.service",
+        "token-ledger-sync.timer",
+      ]);
+      // A running timer keeps its old schedule until restarted, so each install restarts it.
+      assert.strictEqual(lines.filter((line) => line.includes("restart")).length, 3);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("schedules a daily sync at the given time", () =>
+    Effect.gen(function* () {
+      const plan = describe(yield* systemdTimer("/tmp/units").install({ ...job, every: 24 }));
+
+      assert.include(plan, "OnCalendar=*-*-* 07:05:00\n");
+    }),
   );
 
   it.effect("writes nothing when no user session answers, and says what to do instead", () =>
@@ -215,8 +251,15 @@ suite("launchd agent", () => {
         contents,
         `<string>cd /; export XDG_CONFIG_HOME='/home/me/my config'; export PATH='/opt/node 24/bin':"$PATH"; exec npx --yes @ponbac/token-ledger@latest sync --config '/tmp/my cfg/it'\\''s $HOME %h "x" \\ &amp; &lt;b&gt;.json' --time-zone Europe/Stockholm</string>`,
       );
-      assert.match(contents, /<key>Hour<\/key>\s*<integer>7<\/integer>/);
-      assert.match(contents, /<key>Minute<\/key>\s*<integer>5<\/integer>/);
+      assert.deepStrictEqual(
+        Array.from(
+          contents.matchAll(
+            /<key>Hour<\/key>\s*<integer>(\d+)<\/integer>\s*<key>Minute<\/key>\s*<integer>(\d+)<\/integer>/g,
+          ),
+          ([, hour, minute]) => `${hour}:${minute}`,
+        ),
+        ["1:5", "7:5", "13:5", "19:5"],
+      );
       assert.deepStrictEqual(
         lines.map((line) => line.replaceAll("\\", "/")),
         [
@@ -260,6 +303,7 @@ suite("Task Scheduler task", () => {
 
         const actions = yield* taskScheduler(file).install({
           at: "07:05",
+          every: 6,
           nodeDirectory: "C:\\Program Files\\nodejs",
           configHome: Option.some("D:\\my config"),
           dataHome: Option.none(),
@@ -280,7 +324,11 @@ suite("Task Scheduler task", () => {
           script,
           `-Argument '//B //Nologo //E:JScript "${file.replaceAll("'", "''")}"'`,
         );
-        assert.include(script, "-Daily -At '07:05'");
+        assert.include(script, "-Daily -At '01:05'");
+        assert.include(
+          script,
+          "$trigger.Repetition = (New-ScheduledTaskTrigger -Once -At '01:05' -RepetitionInterval (New-TimeSpan -Hours 6) -RepetitionDuration (New-TimeSpan -Hours 18)).Repetition",
+        );
         assert.include(
           script,
           "-StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries",
@@ -328,6 +376,7 @@ suite("Task Scheduler task", () => {
         const outcome = yield* taskScheduler("C:\\config\\token-ledger-sync.js")
           .install({
             at: "12:30",
+            every: 2,
             nodeDirectory: "C:\\nodejs",
             configHome: Option.none(),
             dataHome: Option.none(),
@@ -337,6 +386,23 @@ suite("Task Scheduler task", () => {
 
         assert.isTrue(Result.isFailure(outcome), file);
       }
+    }),
+  );
+
+  it.effect("registers a daily task without repetition", () =>
+    Effect.gen(function* () {
+      const plan = describe(
+        yield* taskScheduler("C:\\config\\token-ledger-sync.js").install({
+          ...job,
+          every: 24,
+          nodeDirectory: "C:\\nodejs",
+          configHome: Option.none(),
+          flags: [],
+        }),
+      );
+
+      assert.include(plan, "-Daily -At '07:05'");
+      assert.notInclude(plan, "Repetition");
     }),
   );
 
@@ -361,6 +427,43 @@ suite("Task Scheduler task", () => {
         assert.strictEqual(yield* fs.exists(file), queryExit === 0);
       }
     }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live.skipIf(process.platform !== "win32")(
+    "builds a trigger that Task Scheduler repeats through the day",
+    () =>
+      Effect.gen(function* () {
+        const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const recorded = scheduler(() => 0);
+
+        yield* perform(
+          yield* taskScheduler("C:\\config\\token-ledger-sync.js").install({
+            ...job,
+            nodeDirectory: "C:\\nodejs",
+            configHome: Option.none(),
+            flags: [],
+          }),
+        ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, recorded.spawner));
+
+        const script = Buffer.from(
+          (recorded.lines[0] ?? "").split(" ").at(-1) ?? "",
+          "base64",
+        ).toString("utf16le");
+
+        // Builds the trigger the way install does, without registering a task.
+        const trigger = [
+          ...script.split("\n").filter((line) => line.startsWith("$trigger")),
+          '"$($trigger.StartBoundary) $($trigger.Repetition.Interval) $($trigger.Repetition.Duration)"',
+        ].join("\n");
+
+        const output = yield* spawner.string(
+          ChildProcess.make("powershell.exe", powershellArguments(trigger), { stdin: "ignore" }),
+        );
+
+        assert.match(output.trim(), /T01:05:00\S* PT6H PT18H$/);
+      }).pipe(Effect.provide(NodeServices.layer)),
+    // A cold PowerShell takes seconds to load the ScheduledTasks module on CI runners.
+    30_000,
   );
 
   it.live.skipIf(process.platform !== "win32")(
@@ -391,6 +494,7 @@ suite("Task Scheduler task", () => {
           yield* perform(
             yield* taskScheduler(file).install({
               at: "07:05",
+              every: 2,
               nodeDirectory: directory,
               configHome: Option.some(configHome),
               dataHome: Option.none(),

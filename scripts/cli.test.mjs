@@ -678,6 +678,8 @@ await test("login saves what a scheduled sync needs, and schedule install change
       "--dry-run",
       "--at",
       "07:05",
+      "--every",
+      "6h",
       "--config",
       configuration,
     ]);
@@ -692,7 +694,12 @@ await test("login saves what a scheduled sync needs, and schedule install change
 
     assert.ok(plan.stdout.includes(printedPath(configuration)));
     assert.ok(plan.stdout.includes(`XDG_CONFIG_HOME=${printedPath(join(directory, "config"))}`));
-    assert.match(plan.stdout, /07:05|<integer>7<\/integer>/);
+    // systemd lists the hours, launchd has an entry per time, and Task Scheduler starts the
+    // day at the earliest and repeats.
+    assert.match(
+      plan.stdout,
+      /01,07,13,19:05:00|<integer>19<\/integer>|-At '01:05' -RepetitionInterval \(New-TimeSpan -Hours 6\)/,
+    );
 
     const refused = run(["schedule", "install", "--config", configuration]);
 

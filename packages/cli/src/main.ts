@@ -44,7 +44,14 @@ import {
   summarize,
 } from "./copilot.ts";
 import { csv, syncSummary, table } from "./format.ts";
-import { TimeOfDay, describe, hostScheduler, perform } from "./schedule.ts";
+import {
+  TimeOfDay,
+  describe,
+  describeTimes,
+  hostScheduler,
+  intervals,
+  perform,
+} from "./schedule.ts";
 import {
   ServerUrl,
   configHome,
@@ -656,10 +663,14 @@ const login = Command.make(
 const scheduleInstall = Command.make(
   "install",
   {
+    every: Flag.ChoiceWithValue("every", intervals).pipe(
+      Flag.withDefault(2),
+      Flag.withDescription("Time between syncs; defaults to 2h"),
+    ),
     at: Flag.String("at").pipe(
       Flag.withDefault("12:30"),
       Flag.withSchema(TimeOfDay),
-      Flag.withDescription("Daily local time as HH:MM; defaults to 12:30"),
+      Flag.withDescription("A local time, as HH:MM, that a sync runs at; defaults to 12:30"),
     ),
     config: Flag.String("config").pipe(
       Flag.optional,
@@ -684,7 +695,7 @@ const scheduleInstall = Command.make(
     const scheduler = yield* hostScheduler;
     const config = Option.map(flags.config, (value) => expandPath(path, value));
 
-    // The job runs elsewhere and later; a config that is missing now would fail every day.
+    // The job runs elsewhere and later; a config that is missing now would fail every run.
     if (
       Option.isSome(config) &&
       !(yield* fs.exists(config.value).pipe(Effect.orElseSucceed(() => false)))
@@ -693,6 +704,7 @@ const scheduleInstall = Command.make(
 
     const actions = yield* scheduler.install({
       at: flags.at,
+      every: flags.every,
       nodeDirectory: path.dirname(process.execPath),
       configHome: yield* configHome,
       dataHome: yield* dataHome,
@@ -720,12 +732,12 @@ const scheduleInstall = Command.make(
     yield* perform(actions);
 
     yield* Console.log(
-      `Scheduled a daily sync at ${flags.at} as a ${scheduler.name}. Inspect it with token-ledger schedule status.`,
+      `Scheduled a sync ${describeTimes(flags)} as a ${scheduler.name}, replacing any earlier schedule. Inspect it with token-ledger schedule status.`,
     );
   }),
 ).pipe(
   Command.withDescription(
-    "Install or replace the daily sync; it needs the server and token saved by login",
+    "Install or replace the scheduled sync; it needs the server and token saved by login",
   ),
 );
 
@@ -737,7 +749,7 @@ const scheduleStatus = Command.make(
 
     yield* perform(scheduler.status);
   }),
-).pipe(Command.withDescription("Show the scheduler's own report of the daily sync"));
+).pipe(Command.withDescription("Show the scheduler's own report of the scheduled sync"));
 
 const scheduleUninstall = Command.make(
   "uninstall",
@@ -749,10 +761,10 @@ const scheduleUninstall = Command.make(
 
     yield* Console.log(`Removed the ${scheduler.name}. Saved settings were kept.`);
   }),
-).pipe(Command.withDescription("Remove the daily sync; saved settings stay"));
+).pipe(Command.withDescription("Remove the scheduled sync; saved settings stay"));
 
 const schedule = Command.make("schedule").pipe(
-  Command.withDescription("Run sync daily with systemd, launchd, or Task Scheduler"),
+  Command.withDescription("Run sync every few hours with systemd, launchd, or Task Scheduler"),
   Command.withSubcommands([scheduleInstall, scheduleStatus, scheduleUninstall]),
 );
 
