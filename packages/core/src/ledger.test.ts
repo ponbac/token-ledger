@@ -1107,6 +1107,58 @@ describe("Ledger sync payloads through the public interface", () => {
     }).pipe(Effect.provide(runtime)),
   );
 
+  it.effect("attributes a routed request to the proxy's repository when Copilot names none", () =>
+    Effect.gen(function* () {
+      const { write, root, path } = yield* fixture();
+
+      const own = JSON.parse(inference("routed-own"));
+      own.attributes["github.copilot.git.repository"] = "https://github.com/acme/own.git";
+
+      const source = yield* write("otel/events.jsonl", [
+        inference("routed"),
+        inference("routed-unknown"),
+        inference("routed-conflict"),
+        inference("ordinary"),
+        JSON.stringify(own),
+      ]);
+
+      // JSON omits an undefined repository, as a proxy that cannot tell would.
+      const hint = (requestId: string, repository?: string) =>
+        JSON.stringify({ requestId, billingProvider: "codex", authMode: "chatgpt", repository });
+
+      yield* write("hints/chatgpt-proxy.jsonl", [
+        hint("routed", "https://martin@dev.azure.com/org/Project%20X/_git/App"),
+        hint("routed"),
+        hint("routed-unknown"),
+        hint("routed-conflict", "https://dev.azure.com/org/project/_git/one"),
+        hint("routed-conflict", "https://dev.azure.com/org/project/_git/two"),
+        hint("ordinary-unrouted", "https://dev.azure.com/org/project/_git/unused"),
+        hint("routed-own", "https://dev.azure.com/org/project/_git/hinted"),
+      ]);
+
+      const payload = yield* (yield* Ledger).syncPayload(
+        {
+          ...request([{ provider: "copilot", path: source }]),
+          billingHints: { directory: path.join(root, "hints"), required: false },
+        },
+        client,
+      );
+
+      assert.deepStrictEqual(
+        payload.buckets
+          .map((bucket) => [bucket.project, bucket.billingProvider ?? null, bucket.records])
+          .toSorted((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
+        [
+          ["dev.azure.com/org/Project%20X/_git/App", "codex", 1],
+          ["github.com/acme/own", "codex", 1],
+          ["unattributed", "codex", 2],
+          ["unattributed", null, 1],
+        ],
+      );
+      assert.notInclude(JSON.stringify(payload), "martin@");
+    }).pipe(Effect.provide(runtime)),
+  );
+
   it.effect("counts a span without a response ID once with its inference event's billing", () =>
     Effect.gen(function* () {
       const { write, root, path } = yield* fixture();

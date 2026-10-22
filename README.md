@@ -455,6 +455,8 @@ Copilot requests routed through a ChatGPT OAuth proxy can use
 [local billing hints](docs/billing-hints.md). On Windows the proxy appends metadata to
 `%LOCALAPPDATA%\token-ledger\billing-hints\chatgpt-proxy.jsonl`; no path configuration
 is needed. Usage stays attributed to Copilot, with ChatGPT/Codex as its subscription payer.
+A hint can also name the request's repository, for custom endpoints whose Copilot
+telemetry has none.
 
 `sync` uploads this machine's usage to a [toki2](https://github.com/ponbac/toki2)
 server, which combines every developer's machines for team reporting and billing.
