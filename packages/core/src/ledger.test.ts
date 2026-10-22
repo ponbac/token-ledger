@@ -1113,8 +1113,23 @@ describe("Ledger sync payloads through the public interface", () => {
 
       const own = JSON.parse(inference("routed-own"));
       own.attributes["github.copilot.git.repository"] = "https://github.com/acme/own.git";
+      // One request twice: its event names Copilot's repository, its preferred span none.
+      const split = JSON.parse(inference("split"));
+      split.attributes["gen_ai.response.id"] = "routed-split";
+
+      const splitEvent = JSON.stringify({
+        hrTime: split.endTime,
+        spanContext: { traceId: "trace", spanId: "split" },
+        attributes: {
+          ...split.attributes,
+          "event.name": "gen_ai.client.inference.operation.details",
+          "github.copilot.git.repository": "https://github.com/acme/event.git",
+        },
+      });
 
       const source = yield* write("otel/events.jsonl", [
+        splitEvent,
+        JSON.stringify(split),
         inference("routed"),
         inference("routed-unknown"),
         inference("routed-conflict"),
@@ -1134,6 +1149,7 @@ describe("Ledger sync payloads through the public interface", () => {
         hint("routed-conflict", "https://dev.azure.com/org/project/_git/two"),
         hint("ordinary-unrouted", "https://dev.azure.com/org/project/_git/unused"),
         hint("routed-own", "https://dev.azure.com/org/project/_git/hinted"),
+        hint("routed-split", "https://dev.azure.com/org/project/_git/hinted"),
       ]);
 
       const payload = yield* (yield* Ledger).syncPayload(
@@ -1150,6 +1166,7 @@ describe("Ledger sync payloads through the public interface", () => {
           .toSorted((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
         [
           ["dev.azure.com/org/Project%20X/_git/App", "codex", 1],
+          ["github.com/acme/event", "codex", 1],
           ["github.com/acme/own", "codex", 1],
           ["unattributed", "codex", 2],
           ["unattributed", null, 1],

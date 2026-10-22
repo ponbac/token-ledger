@@ -231,9 +231,6 @@ export function copilotParser(
           key = ancestor?.parent;
         }
 
-        // Some custom-model requests have no agent span, so only the proxy knows the repository.
-        repository ??= candidate.hinted ?? null;
-
         const resolved = { ...candidate, record: { ...candidate.record, repository } };
         const previous = preferred.get(resolved.record.id);
 
@@ -250,6 +247,12 @@ export function copilotParser(
           });
         }
       }
+
+      // Some custom-model requests have no agent span, so only the proxy knows the repository.
+      // Applied after merging, so Copilot's own repository on either copy still wins.
+      for (const [id, merged] of preferred)
+        if (merged.record.repository === null && merged.hinted)
+          preferred.set(id, { ...merged, record: { ...merged.record, repository: merged.hinted } });
 
       // Preserve duplicate accounting in Ledger while presenting the enriched record first.
       const records = identified.map(
