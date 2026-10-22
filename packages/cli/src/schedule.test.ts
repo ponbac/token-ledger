@@ -462,6 +462,8 @@ suite("Task Scheduler task", () => {
 
         assert.match(output.trim(), /T01:05:00\S* PT6H P1D$/);
       }).pipe(Effect.provide(NodeServices.layer)),
+    // A cold PowerShell takes seconds to load the ScheduledTasks module on CI runners.
+    30_000,
   );
 
   it.live.skipIf(process.platform !== "win32")(
