@@ -1,7 +1,7 @@
 import { Data, Schema } from "effect";
 
 /** Supported local histories and Copilot CLI / VS Code Chat telemetry exports. */
-export const Provider = Schema.Literals(["codex", "claude", "grok", "copilot", "pi"]);
+export const Provider = Schema.Literals(["codex", "claude", "grok", "copilot", "pi", "opencode"]);
 
 /** Providers for which a user can declare a subscription. */
 export const BillingProvider = Schema.Literals(["codex", "claude", "grok", "copilot"]);

@@ -15,7 +15,7 @@ import {
   Stream,
 } from "effect";
 
-import { dayWindow } from "./calendar.ts";
+import { type InstantRange, dayWindow } from "./calendar.ts";
 import { type ChatgptRequest, readBillingHints } from "./billing-hints.ts";
 import {
   type Coverage,
@@ -34,6 +34,12 @@ import { codexParser } from "./providers/codex.ts";
 import { copilotDatabaseLines, type CopilotDatabaseError } from "./providers/copilot-db.ts";
 import { copilotParser } from "./providers/copilot.ts";
 import { grokParser } from "./providers/grok.ts";
+import {
+  type OpencodeDatabaseError,
+  opencodeDatabaseLines,
+  opencodeDatabaseName,
+} from "./providers/opencode-db.ts";
+import { type OpencodeFile, opencodeHistory } from "./providers/opencode.ts";
 import { piParser } from "./providers/pi.ts";
 import type { ParseResult } from "./providers/shared.ts";
 import {
@@ -139,11 +145,12 @@ export class Ledger extends Context.Service<
       /**
        * Streams each deduplicated, non-empty record that `locate` places, with its project, and
        * each plan hint it places. Records outside the window are neither deduplicated nor attributed.
-       * `locate` places nothing before `start`, so files settled before it are counted unopened.
+       * `locate` places nothing outside `range`, so files settled before it are counted unopened,
+       * and databases select only rows inside it.
        */
       const scan = Effect.fn("Ledger.scan")(function* <Slot>(
         request: ReportRequest,
-        start: number,
+        range: InstantRange,
         locate: (timestamp: number) => Slot | undefined,
         collect: (record: UsageRecord, attribution: Attribution, slot: Slot) => void,
         notice?: (plan: ObservedPlan) => void,
@@ -184,6 +191,10 @@ export class Ledger extends Context.Service<
         const coverage: Array<() => Coverage> = [];
         // A fork's copies wait for every source, so whichever file holds the original wins.
         const inherited: Array<Effect.Effect<void>> = [];
+        // Records only every source can classify as originals or copies; run before the copies.
+        const deferred: Array<Effect.Effect<void>> = [];
+        // OpenCode matches a fork's copies to originals in any of its databases and files.
+        const opencode = opencodeHistory((value) => path.normalize(value));
 
         for (const source of request.sources) {
           let files = 0;
@@ -235,7 +246,26 @@ export class Ledger extends Context.Service<
               const slot = locate(record.timestamp);
 
               if (slot !== undefined && totalTokens(record.tokens) > 0)
-                inherited.push(place(record, slot));
+                inherited.push(Effect.suspend(() => place(opencode.settle(record), slot)));
+            }
+
+            for (const record of result.deferred) {
+              const slot = locate(record.timestamp);
+
+              if (slot !== undefined && totalTokens(record.tokens) > 0)
+                deferred.push(
+                  Effect.suspend(() => {
+                    const classified = opencode.classify(record);
+
+                    return classified.copy
+                      ? Effect.sync(() => {
+                          inherited.push(
+                            Effect.suspend(() => place(opencode.settle(classified.record), slot)),
+                          );
+                        })
+                      : place(classified.record, slot);
+                  }),
+                );
             }
           });
 
@@ -245,7 +275,7 @@ export class Ledger extends Context.Service<
           ) {
             const canonical = yield* fs.realPath(file);
             const identity = `${source.provider}:${canonical}`;
-            const settled = settledBefore(source, file, info, start - modifiedSlack);
+            const settled = settledBefore(path, source, file, info, range.start - modifiedSlack);
 
             if (visitedFiles.has(identity) || (settled && settledFiles.has(identity))) {
               warnings.add(
@@ -270,16 +300,27 @@ export class Ledger extends Context.Service<
               Match.when("grok", () => grokParser(canonical)),
               Match.when("copilot", () => copilot ?? copilotParser(canonical)),
               Match.when("pi", () => piParser(canonical)),
+              Match.when("opencode", () => opencode.parser(opencodeFile(path, canonical))),
               Match.exhaustive,
             );
 
             let lineNumber = 0;
             files++;
 
-            const lines: Stream.Stream<string, PlatformError.PlatformError | CopilotDatabaseError> =
+            const lines: Stream.Stream<
+              string,
+              PlatformError.PlatformError | CopilotDatabaseError | OpencodeDatabaseError
+            > =
               source.provider === "copilot" && canonical.endsWith(".db")
                 ? Stream.fromIterableEffect(copilotDatabaseLines(canonical))
-                : fs.stream(canonical).pipe(Stream.decodeText, Stream.splitLines);
+                : source.provider === "opencode"
+                  ? opencodeFile(path, canonical) === "database"
+                    ? Stream.fromIterableEffect(
+                        opencodeDatabaseLines(canonical, range.start, range.end),
+                      )
+                    : // A legacy message or session file is one JSON document over several lines.
+                      Stream.fromEffect(fs.readFileString(canonical))
+                  : fs.stream(canonical).pipe(Stream.decodeText, Stream.splitLines);
 
             yield* lines.pipe(
               Stream.runForEach(
@@ -308,6 +349,7 @@ export class Ledger extends Context.Service<
               const stat = yield* fs.stat(entry);
 
               if (stat.type === "Directory") {
+                if (!descends(path, source, entry)) return;
                 const canonical = yield* fs.realPath(entry);
 
                 if (visitedDirectories.has(canonical)) return;
@@ -316,7 +358,7 @@ export class Ledger extends Context.Service<
 
                 for (const child of children.toSorted().toReversed())
                   pending.push(path.join(entry, child));
-              } else if (stat.type === "File" && acceptsFile(source, entry)) {
+              } else if (stat.type === "File" && acceptsFile(path, source, entry)) {
                 yield* scanFile(entry, stat);
               }
             }).pipe(Effect.result);
@@ -340,9 +382,20 @@ export class Ledger extends Context.Service<
           if (hintsFailed)
             warnings.add("Billing hints could not be read; stored Copilot usage will be kept.");
 
+          // A directory holding no OpenCode history at all is not evidence of none.
+          const unrecognised =
+            source.provider === "opencode" &&
+            !missingRoot &&
+            failedFiles === 0 &&
+            files === 0 &&
+            filesBeforeWindow === 0;
+
+          if (unrecognised)
+            warnings.add("No OpenCode database or legacy message or session was found here.");
+
           const status = hintsFailed
             ? "failed"
-            : missingRoot
+            : missingRoot || unrecognised
               ? "missing"
               : failedFiles > 0 && files === 0
                 ? "failed"
@@ -364,6 +417,8 @@ export class Ledger extends Context.Service<
           }));
         }
 
+        for (const legacy of deferred) yield* legacy;
+
         for (const copy of inherited) yield* copy;
 
         return coverage.map((summarize) => summarize());
@@ -374,24 +429,19 @@ export class Ledger extends Context.Service<
         const window = dayWindow(request.since, request.until, request.timeZone);
         const rows = new Map<string, ReportRow>();
 
-        const coverage = yield* scan(
-          request,
-          window.start,
-          window.dayOf,
-          (record, { project }, day) => {
-            const key = JSON.stringify([project, day, record.provider, record.model]);
-            const price = lookupPrice(request.pricing, record.model);
+        const coverage = yield* scan(request, window, window.dayOf, (record, { project }, day) => {
+          const key = JSON.stringify([project, day, record.provider, record.model]);
+          const price = lookupPrice(request.pricing, record.model);
 
-            rows.set(key, {
-              project,
-              day,
-              provider: record.provider,
-              model: record.model,
-              pricePerMillion: price ?? null,
-              ...addUsage(rows.get(key), record.tokens, priceTokens(record.tokens, price)),
-            });
-          },
-        );
+          rows.set(key, {
+            project,
+            day,
+            provider: record.provider,
+            model: record.model,
+            pricePerMillion: price ?? null,
+            ...addUsage(rows.get(key), record.tokens, priceTokens(record.tokens, price)),
+          });
+        });
 
         return UsageReport.make({
           version: 2,
@@ -446,7 +496,7 @@ export class Ledger extends Context.Service<
 
         const coverage = yield* scan(
           request,
-          from,
+          { start: from, end: requested.end },
           (timestamp) => (timestamp >= from && timestamp < requested.end ? timestamp : undefined),
           (record, attribution, timestamp) => {
             earliest = Math.min(earliest, timestamp);
@@ -519,28 +569,85 @@ export class Ledger extends Context.Service<
   );
 }
 
-function acceptsFile(source: Source, file: string): boolean {
+function acceptsFile(path: Path.Path, source: Source, file: string): boolean {
   if (source.path === file) return true;
 
   if (source.provider === "grok")
     return file.endsWith("/updates.jsonl") || file.endsWith("\\updates.jsonl");
 
+  if (source.provider === "opencode")
+    return (
+      opencodeFile(path, file) !== "database" || opencodeDatabaseName.test(path.basename(file))
+    );
+
   return file.endsWith(".jsonl") || (source.provider === "copilot" && file.endsWith(".db"));
+}
+
+/**
+ * What an OpenCode file holds, by its name wherever it lies: `msg_*.json` is a legacy message,
+ * `ses_*.json` a legacy session, and any other file a source names, such as an `OPENCODE_DB`
+ * override with any extension, is opened as SQLite. A database is never read as text, and one
+ * that cannot be opened is unreadable history. Under a source, other databases are read only
+ * by OpenCode's own names.
+ */
+function opencodeFile(path: Path.Path, file: string): OpencodeFile {
+  const name = path.basename(file);
+
+  if (!name.endsWith(".json")) return "database";
+
+  return name.startsWith("msg_") ? "message" : name.startsWith("ses_") ? "session" : "database";
+}
+
+/**
+ * Directories beside OpenCode's history that never hold it: file snapshots, logs, cloned
+ * repositories, and binaries, often gigabytes, and legacy parts, diffs, shares, and to-do lists,
+ * some named after their session like its legacy session files.
+ */
+const opencodeElsewhere = new Set([
+  "bin",
+  "log",
+  "part",
+  "repos",
+  "session_diff",
+  "session_share",
+  "share",
+  "shell",
+  "snapshot",
+  "todo",
+  "tool-output",
+]);
+
+/** Whether a directory under a source can hold its history. */
+function descends(path: Path.Path, source: Source, directory: string): boolean {
+  return (
+    source.provider !== "opencode" ||
+    directory === source.path ||
+    !opencodeElsewhere.has(path.basename(directory))
+  );
 }
 
 /**
  * Whether a file found under a source directory was last modified before `cutoff`, and so holds
  * no later usage. A file named as the source itself is always read. So is every Copilot file: a
  * request takes its repository and cache details from spans in other files, and a live SQLite
- * database keeps new rows in its write-ahead log without touching its own modification time.
+ * database keeps new rows in its write-ahead log without touching its own modification time,
+ * as OpenCode's databases do. OpenCode's legacy session files are small and always read, since
+ * a fork's copies are known by when their session began; its message files are rewritten only
+ * while their request runs.
  */
 function settledBefore(
+  path: Path.Path,
   source: Source,
   file: string,
   info: FileSystem.File.Info,
   cutoff: number,
 ): boolean {
-  if (source.path === file || source.provider === "copilot") return false;
+  if (
+    source.path === file ||
+    source.provider === "copilot" ||
+    (source.provider === "opencode" && opencodeFile(path, file) !== "message")
+  )
+    return false;
 
   return Option.isSome(info.mtime) && info.mtime.value.getTime() < cutoff;
 }
