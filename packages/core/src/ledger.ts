@@ -16,7 +16,7 @@ import {
 } from "effect";
 
 import { dayWindow } from "./calendar.ts";
-import { readBillingHints } from "./billing-hints.ts";
+import { type ChatgptRequest, readBillingHints } from "./billing-hints.ts";
 import {
   type Coverage,
   type Day,
@@ -157,10 +157,12 @@ export class Ledger extends Context.Service<
                 Effect.provideService(FileSystem.FileSystem, fs),
                 Effect.provideService(Path.Path, path),
               )
-            : Effect.succeed(new Set<string>())
+            : Effect.succeed(new Map<string, ChatgptRequest>())
         ).pipe(Effect.result);
 
-        const chatgptRequests = Result.isSuccess(hints) ? hints.success : new Set<string>();
+        const chatgptRequests = Result.isSuccess(hints)
+          ? hints.success
+          : new Map<string, ChatgptRequest>();
 
         if (Result.isFailure(hints))
           yield* (

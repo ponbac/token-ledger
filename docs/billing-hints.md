@@ -24,6 +24,25 @@ Use this pair only for a request actually routed through ChatGPT OAuth, never an
 Append complete UTF-8 lines followed by a newline. Repeated identical hints are harmless.
 Do not log prompts, responses, tokens, cookies, authorization headers, or credentials here.
 
+A hint may also name the request's Git repository:
+
+```json
+{
+  "requestId": "incoming-X-Request-Id",
+  "billingProvider": "codex",
+  "authMode": "chatgpt",
+  "repository": "https://dev.azure.com/org/project/_git/repo"
+}
+```
+
+`repository` is the remote URL of the repository the sending VS Code workspace works in.
+Requests to some custom endpoints produce no agent span, so Copilot's telemetry never
+names their repository and they would otherwise be `unattributed`. Token Ledger uses the
+hinted remote only when Copilot names none, and treats it like any other Git remote:
+only network remotes are uploaded, without credentials. Omit the field when the
+repository is not certain. Rows naming different repositories for one request leave it
+without one. Like the payer, a hinted repository applies to `sync` only.
+
 Hints only annotate matching Copilot token records. An unmatched hint creates no usage;
 an unhinted request keeps ordinary Copilot billing. No model-name inference is performed.
 The source provider and session identity remain Copilot. Only `billingProvider` is

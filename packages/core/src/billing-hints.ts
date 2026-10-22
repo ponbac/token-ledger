@@ -13,10 +13,20 @@ const Hint = Schema.fromJsonString(
     requestId: Schema.NonEmptyString,
     billingProvider: Schema.Literal("codex"),
     authMode: Schema.Literal("chatgpt"),
+    repository: Schema.optionalKey(Schema.NonEmptyString),
   }),
 );
 
-/** Exact incoming X-Request-Id values, local only; no upstream response IDs or model inference. */
+/** What the proxy knows about one ChatGPT-routed request. */
+export interface ChatgptRequest {
+  /** The Git remote the request's workspace works in, when the proxy could tell. */
+  readonly repository: string | null;
+}
+
+/**
+ * ChatGPT-routed requests by exact incoming X-Request-Id, local only; no upstream response IDs
+ * or model inference. Rows naming different repositories for one request keep none.
+ */
 export const readBillingHints = Effect.fn("BillingHints.read")(function* (location: {
   readonly directory: string;
   readonly required: boolean;
@@ -27,12 +37,12 @@ export const readBillingHints = Effect.fn("BillingHints.read")(function* (locati
 
   if (Result.isFailure(entries)) {
     if (!location.required && Predicate.isTagged(entries.failure.reason, "NotFound"))
-      return new Set<string>();
+      return new Map<string, ChatgptRequest>();
 
     return yield* new BillingHintsError({ message: "Cannot read the billing hints directory." });
   }
 
-  const requests = new Set<string>();
+  const repositories = new Map<string, Set<string>>();
 
   for (const entry of entries.success.toSorted()) {
     if (!entry.endsWith(".jsonl")) continue;
@@ -63,9 +73,17 @@ export const readBillingHints = Effect.fn("BillingHints.read")(function* (locati
         ),
       );
 
-      requests.add(hint.requestId);
+      const named = repositories.get(hint.requestId) ?? new Set<string>();
+
+      if (hint.repository !== undefined) named.add(hint.repository);
+      repositories.set(hint.requestId, named);
     }
   }
 
-  return requests;
+  return new Map(
+    [...repositories].map(([requestId, named]): [string, ChatgptRequest] => [
+      requestId,
+      { repository: named.size === 1 ? ([...named][0] ?? null) : null },
+    ]),
+  );
 });

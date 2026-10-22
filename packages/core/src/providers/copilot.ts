@@ -1,5 +1,6 @@
 import { Option, Schema } from "effect";
 
+import type { ChatgptRequest } from "../billing-hints.ts";
 import { RepositoryReference, type UsageRecord } from "../model.ts";
 import { decodeJson, empty, malformed, skipped, type TranscriptParser } from "./shared.ts";
 
@@ -63,6 +64,8 @@ interface Candidate {
   readonly spanKey: string | undefined;
   readonly responseId: string | undefined;
   readonly isSpan: boolean;
+  /** The repository the proxy hinted for this request, used only when Copilot names none. */
+  readonly hinted?: UsageRecord["repository"];
 }
 
 function repositoryReference(attributes: typeof CopilotAttributes.Type): UsageRecord["repository"] {
@@ -81,7 +84,7 @@ function repositoryReference(attributes: typeof CopilotAttributes.Type): UsageRe
 /** Buffers one Copilot source to resolve out-of-order spans before request deduplication. */
 export function copilotParser(
   file: string,
-  chatgptRequests: ReadonlySet<string> = new Set(),
+  chatgptRequests: ReadonlyMap<string, ChatgptRequest> = new Map(),
 ): TranscriptParser {
   const spans = new Map<string, AttributionSpan>();
   const candidates: Candidate[] = [];
@@ -199,13 +202,18 @@ export function copilotParser(
 
         if (responseId === undefined) return candidate;
         const record = { ...candidate.record, id: `response:${responseId}` };
+        const routed = chatgptRequests.get(responseId);
+
+        if (routed === undefined) return { ...candidate, responseId, record };
 
         return {
           ...candidate,
           responseId,
-          record: chatgptRequests.has(responseId)
-            ? { ...record, billingProvider: "codex" }
-            : record,
+          record: { ...record, billingProvider: "codex" },
+          hinted:
+            routed.repository === null
+              ? null
+              : RepositoryReference.Remote({ value: routed.repository }),
         };
       });
 
@@ -239,6 +247,12 @@ export function copilotParser(
           });
         }
       }
+
+      // Some custom-model requests have no agent span, so only the proxy knows the repository.
+      // Applied after merging, so Copilot's own repository on either copy still wins.
+      for (const [id, merged] of preferred)
+        if (merged.record.repository === null && merged.hinted)
+          preferred.set(id, { ...merged, record: { ...merged.record, repository: merged.hinted } });
 
       // Preserve duplicate accounting in Ledger while presenting the enriched record first.
       const records = identified.map(
