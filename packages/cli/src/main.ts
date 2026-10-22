@@ -14,6 +14,7 @@ import {
   type Source,
 } from "@token-ledger/core/model";
 import { loadPrices } from "@token-ledger/core/pricing";
+import { opencodeDatabaseName } from "@token-ledger/core/providers/opencode-db";
 import type { SyncPayload } from "@token-ledger/core/sync";
 import {
   Config,
@@ -104,9 +105,15 @@ function usageFlags(sinceDefault: string, strict: string) {
         "IANA time zone for days and the window, such as Europe/Stockholm; defaults to the system zone",
       ),
     ),
-    provider: Flag.Literals("provider", ["all", "codex", "claude", "grok", "copilot", "pi"]).pipe(
-      Flag.withDefault("all"),
-    ),
+    provider: Flag.Literals("provider", [
+      "all",
+      "codex",
+      "claude",
+      "grok",
+      "copilot",
+      "pi",
+      "opencode",
+    ]).pipe(Flag.withDefault("all")),
     project: Flag.String("project").pipe(
       Flag.withSchema(ProjectName),
       Flag.optional,
@@ -189,6 +196,21 @@ const usageRequest = Effect.fn("CLI.usageRequest")(function* (
 
   const piSessions = yield* Config.String("PI_CODING_AGENT_SESSION_DIR").pipe(Config.option);
 
+  // OpenCode follows XDG on every platform, Windows and macOS included.
+  const opencodeData = path.join(
+    Option.getOrElse(yield* dataHome, () => path.join(home, ".local", "share")),
+    "opencode",
+  );
+
+  // Names the database file, relative to the data directory, in place of `opencode.db`.
+  const opencodeDatabase = Option.map(
+    Option.filter(
+      yield* Config.String("OPENCODE_DB").pipe(Config.option),
+      (value) => value !== "" && value !== ":memory:",
+    ),
+    (value) => path.resolve(opencodeData, value),
+  );
+
   const defaults: Source[] = [
     { provider: "codex", path: path.join(expand(codexHome), "sessions") },
     { provider: "codex", path: path.join(expand(codexHome), "archived_sessions") },
@@ -205,6 +227,15 @@ const usageRequest = Effect.fn("CLI.usageRequest")(function* (
         onSome: (value) => expand(value),
       }),
     },
+    { provider: "opencode", path: opencodeData },
+    ...Option.match(opencodeDatabase, {
+      onNone: (): Source[] => [],
+      // The data directory's walk already reads a channel database beside the others.
+      onSome: (file): Source[] =>
+        path.dirname(file) === opencodeData && opencodeDatabaseName.test(path.basename(file))
+          ? []
+          : [{ provider: "opencode", path: file }],
+    }),
   ];
 
   let sources: readonly Source[] =
@@ -221,7 +252,7 @@ const usageRequest = Effect.fn("CLI.usageRequest")(function* (
   if (Option.isSome(flags.source)) {
     if (flags.provider === "all")
       return yield* new CliError({
-        message: "--source requires --provider codex, claude, grok, copilot, or pi.",
+        message: "--source requires --provider codex, claude, grok, copilot, pi, or opencode.",
       });
     sources = [{ provider: flags.provider, path: expand(flags.source.value) }];
   }
@@ -681,9 +712,15 @@ const scheduleInstall = Command.make(
       Flag.optional,
       Flag.withDescription("IANA time zone for the scheduled sync; defaults to the system zone"),
     ),
-    provider: Flag.Literals("provider", ["all", "codex", "claude", "grok", "copilot", "pi"]).pipe(
-      Flag.withDefault("all"),
-    ),
+    provider: Flag.Literals("provider", [
+      "all",
+      "codex",
+      "claude",
+      "grok",
+      "copilot",
+      "pi",
+      "opencode",
+    ]).pipe(Flag.withDefault("all")),
     dryRun: Flag.Boolean("dry-run").pipe(
       Flag.withDefault(false),
       Flag.withDescription("Print the files and commands; change nothing"),

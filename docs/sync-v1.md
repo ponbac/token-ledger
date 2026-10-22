@@ -5,12 +5,20 @@ Schema `SyncPayload` in [`packages/core/src/sync.ts`](../packages/core/src/sync.
 authoritative; this page explains it. Figures are API-equivalent estimates, not bills.
 
 Version 2 adds an optional `billingProvider` to each bucket. It names a different
-subscription provider (`codex`, `claude`, `grok`, or `copilot`); Pi cannot be a payer.
+subscription provider (`codex`, `claude`, `grok`, or `copilot`); Pi and OpenCode cannot
+be payers.
 The source `provider` remains unchanged. The bucket key additionally includes
 `billingProvider` (absent means native routing), allowing different payers in the
 same hour, session, project and model. Coverage and replacement still use the source
 provider. Version 1 cannot carry billing overrides. Clients send version 2 only when
 at least one uploaded bucket has an override. See [local billing hints](billing-hints.md).
+
+OpenCode is a source that routes requests to other providers' subscriptions: `copilot` for
+its `github-copilot` route, and `codex` for an `openai` request whose recorded cost is
+exactly zero, which OpenCode's ChatGPT sign-in produces by clearing every OpenAI model's
+rates. Other OpenCode routes carry no override. toki2 must accept the `opencode` provider
+before a release containing it is published: an older server rejects the whole payload as
+invalid, for every provider in it.
 
 Version 3 keeps the priced subtotal of a bucket that mixes priced and unpriced records,
 which happens when a priced model's rates lack a token kind a record used, such as cache
@@ -119,6 +127,7 @@ declared subscriptions, which remain authoritative; a missing hint proves nothin
 | Copilot     | None observed: Copilot CLI and VS Code Chat exports carry no plan, SKU, or entitlement attribute.                                                                                                    |
 | Grok Build  | Not investigated yet.                                                                                                                                                                                |
 | Pi          | `openai-codex` when usage ran through Pi's ChatGPT sign-in, a route with no API-key form. Pi records the route, not the plan, and no other route is sent: `anthropic`, for one, also takes API keys. |
+| OpenCode    | None: OpenCode records no plan. Its routes become bucket `billingProvider` overrides instead (above).                                                                                                |
 
 ## Project keys
 
@@ -148,11 +157,13 @@ versions 1 and 2, and exactly when `unpricedRecords` equals `records` in version
 A provider absent from `coverage` was not scanned, for example because of
 `--provider`, and also keeps its stored data. Missing data is never treated as zero.
 
-Transcripts are append-only, so the client does not open a Codex, Claude Code, Grok, or
-Pi file last modified more than 36 hours before `window.start`. `files` and the diagnostic
-counts describe the files opened, and `filesBeforeWindow` counts the rest. A provider
+Transcripts are append-only, so the client does not open a Codex, Claude Code, Grok, Pi,
+or legacy OpenCode message file last modified more than 36 hours before `window.start`.
+`files` and the diagnostic counts describe the files opened, and `filesBeforeWindow`
+counts the rest. A provider
 whose history all predates the window is therefore `ok` with `files` 0, and its stored
-buckets in the window are replaced with none. Copilot exports are always opened.
+buckets in the window are replaced with none. Copilot exports and OpenCode databases are
+always opened.
 `filesBeforeWindow` is optional: the first version 1 clients omit it, and a server may ignore it.
 
 ## Server semantics

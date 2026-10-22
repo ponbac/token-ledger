@@ -12,6 +12,8 @@ export interface ParseResult {
   readonly records: readonly UsageRecord[];
   /** Records a forked session copied from its parent, counted only where no original is read. */
   readonly inherited: readonly UsageRecord[];
+  /** Records that are originals or copies depending on files read later; classified at the end. */
+  readonly deferred: readonly UsageRecord[];
   readonly hints: readonly PlanHint[];
   readonly malformed: number;
   readonly skipped: number;
@@ -28,6 +30,7 @@ export interface TranscriptParser {
 export const empty: ParseResult = {
   records: [],
   inherited: [],
+  deferred: [],
   hints: [],
   malformed: 0,
   skipped: 0,

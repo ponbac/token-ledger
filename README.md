@@ -101,11 +101,41 @@ node packages/cli/dist/main.js report
 | Grok Build                 | `~/.grok/sessions/**/updates.jsonl`                     | Saved completed turns and their model breakdowns                                |
 | Copilot CLI / VS Code Chat | `~/.copilot/otel` or `COPILOT_OTEL_FILE_EXPORTER_PATH`  | JSONL request spans, VS Code inference events, and SQLite span exports          |
 | Pi                         | `~/.pi/agent/sessions` or `PI_CODING_AGENT_SESSION_DIR` | Assistant messages on every branch, plus usage, compaction, and summary entries |
+| OpenCode                   | `~/.local/share/opencode`                               | Assistant messages in `opencode*.db` and legacy `storage/message` files         |
 
 `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `GROK_HOME`, `COPILOT_HOME`, and `PI_CODING_AGENT_DIR`
-override the usual homes. Configuration supports additional accounts, machines' exported histories,
+override the usual homes. OpenCode keeps its data under `$XDG_DATA_HOME/opencode` on every
+platform, Windows and macOS included, so an absolute `XDG_DATA_HOME` moves it, and
+`OPENCODE_DB` names a database file in place of `opencode.db`, relative to that directory.
+Configuration supports additional accounts, machines' exported histories,
 and arbitrary source directories. Histories are opened read-only, including work
 performed outside T3 Code.
+
+### OpenCode
+
+Token Ledger reads OpenCode's SQLite database read-only, and every release channel's
+`opencode-<channel>.db` beside it, selecting only accounting fields: message and session
+IDs, timestamps, route, model, token counts, recorded cost, and working directory. Prompts,
+responses, and tool output stay in the database; they are in tables and columns it never
+selects. Under an `opencode` source, wherever it is rooted, every `opencode*.db` is read
+as a database, every `msg_*.json` as a legacy message, and every `ses_*.json` as a legacy
+session, of which only its ID and start time are read. Directories that never hold history
+are skipped: snapshots, logs, cloned repositories, binaries, and the legacy store's parts,
+diffs, shares, and to-do lists. Credentials and other files are never read. A file a source
+names directly, such as an `OPENCODE_DB` override with any extension, is opened as SQLite
+unless it is legacy JSON; one that cannot be opened counts as unreadable history, so `sync`
+keeps the server's stored OpenCode usage. A source directory holding no OpenCode history at
+all is reported as `missing`, which keeps stored usage too. Working directories
+OpenCode stored on Windows with forward slashes are matched as native paths.
+
+Models are reported under the ID OpenCode recorded, such as `claude-opus-4.5`, and priced
+by the public rate table; GitHub Copilot's dotted Claude IDs are not in it and stay unpriced
+unless configured under `prices`. OpenCode's own recorded costs are not used for estimates.
+
+`sync` names the subscription that paid for a request from the route OpenCode recorded:
+`github-copilot` requests bill to Copilot, and `openai` requests with a recorded cost of
+exactly zero to Codex, because OpenCode's ChatGPT sign-in clears every OpenAI model's
+rates. Other routes, OpenCode Zen and API keys among them, are API-equivalent estimates.
 
 ### Enable Copilot's usage export
 
@@ -677,8 +707,9 @@ Provider histories stay on the machine. `sync` uploads only aggregates, and only
 you run it:
 
 - **Uploaded:** hourly totals per session, project, provider, and model: input,
-  cache, and output tokens, request counts, and API-equivalent cost. Also the window,
-  your time zone name, the machine ID and label, the CLI version, per-provider
+  cache, and output tokens, request counts, and API-equivalent cost, with the
+  subscription that paid when a request's route or a billing hint shows it. Also the
+  window, your time zone name, the machine ID and label, the CLI version, per-provider
   coverage counts, pricing provenance, and billing plans Codex reports.
 - **Hashed:** session identities. Some providers use a transcript's file path as its
   session, so no raw session ID is sent.
@@ -741,9 +772,9 @@ refused, `5` unsupported payload version (upgrade token-ledger), `6` payload rej
 - JSONL files are streamed, while Copilot buffers accounting records and span links
   per source for attribution; SQLite imports read the selected accounting rows. Each
   run rescans its sources, and memory grows with observed usage records.
-- Transcripts are append-only, so a Codex, Claude Code, Grok, or Pi file last modified more
-  than 36 hours before the window starts is not opened; coverage counts these as
-  `filesBeforeWindow`. This trusts modification times: a history restored with times
+- Transcripts are append-only, so a Codex, Claude Code, Grok, Pi, or legacy OpenCode file
+  last modified more than 36 hours before the window starts is not opened; coverage counts
+  these as `filesBeforeWindow`. This trusts modification times: a history restored with times
   earlier than its last events is missed, so name such a file as the source itself,
   which is always read. Copilot exports are always read too, because requests are
   correlated across files and a live SQLite database's modification time lags its rows.
@@ -761,6 +792,22 @@ refused, `5` unsupported payload version (upgrade token-ledger), `6` payload rej
   `unknown` and stay unpriced. Pi's own recorded costs are not used.
 - A Pi `sessionDir` setting is not read; when sessions live outside the default
   directory, set `PI_CODING_AGENT_SESSION_DIR` or configure a `pi` source.
+- OpenCode keeps each request's usage on its assistant message. Its newer store repeats
+  those messages under the same IDs, and legacy files repeat them too; each request is
+  counted once. A fork copies its parent's messages under new IDs with their timestamps
+  and usage, so a copy, a message older than its session, is matched to its original by
+  timestamp, route, model, and tokens in any OpenCode database or legacy file read, and
+  counted for the fork only when no original is read. Legacy copies are recognised only
+  when their session's file in `storage/session` is read too, by any source. Reverting a session deletes the reverted messages, and their usage with them, as
+  in OpenCode's own totals. A summary's usage is counted from its compaction message; a
+  failed one names no model and is reported under `unknown`, unpriced. Title generation,
+  which OpenCode's newest runtime records only in session totals, is not counted.
+- An OpenCode database is always read, because its modification time lags rows in its
+  write-ahead log; only its messages created in the window are selected, so its rows
+  outside the window are not diagnosed. Legacy session files are always read, and legacy
+  message files follow the modification-time rule above.
+- An `openai` request made with an API key for a model whose listed rates are zero would
+  also be billed to Codex: a recorded cost of zero is the only sign of the ChatGPT sign-in.
 - A truncated or malformed JSONL line is skipped and counted. No prompts are printed
   in diagnostics. An active session can change during a scan; this is not a transactional snapshot.
 - Coverage diagnostics describe every opened file, including its events outside the
