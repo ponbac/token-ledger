@@ -460,7 +460,7 @@ telemetry has none.
 
 `sync` uploads this machine's usage to a [toki2](https://github.com/ponbac/toki2)
 server, which combines every developer's machines for team reporting and billing.
-Run it on **every machine** where you use a coding agent, and schedule it daily.
+Run it on **every machine** where you use a coding agent, and schedule it.
 
 ### Set up
 
@@ -507,24 +507,31 @@ If you map projects in a `token-ledger.json`, pass it with `--config`; scheduled
 do not run in your project directory. Days follow the system time zone; add
 `--time-zone Europe/Stockholm` when a scheduler's environment may lack one.
 
-### Schedule a daily sync
+### Schedule a sync
 
-Schedule a daily sync to upload history before providers prune it:
+Schedule a sync to upload history regularly, and before providers prune it:
 
 ```sh
 npx @ponbac/token-ledger@latest schedule install
 ```
 
-This registers a daily job with the operating system's own scheduler; token-ledger
-does not keep a process running. Run it again to change the job.
+This registers a job with the operating system's own scheduler that syncs every two
+hours, at 00:30, 02:30, and so on; token-ledger does not keep a process running. Run
+it again with other flags to change the job: the new schedule replaces the old one.
 
-| Flag                    | Effect                                                  |
-| ----------------------- | ------------------------------------------------------- |
-| `--at 07:30`            | Daily local time; the default is `12:30`                |
-| `--config <file>`       | Project mappings for the job, saved as an absolute path |
-| `--time-zone <zone>`    | Pass a time zone when the scheduler may not have one    |
-| `--provider <provider>` | Sync one provider only                                  |
-| `--dry-run`             | Print the files and commands, and change nothing        |
+```sh
+npx @ponbac/token-ledger@latest schedule install --every 1h               # hourly, at :30
+npx @ponbac/token-ledger@latest schedule install --every 24h --at 07:30   # once a day
+```
+
+| Flag                    | Effect                                                                   |
+| ----------------------- | ------------------------------------------------------------------------ |
+| `--every 1h`            | `1h`, `2h`, `3h`, `4h`, `6h`, `8h`, `12h`, or `24h`; the default is `2h` |
+| `--at 07:30`            | A local time a sync runs at; the default is `12:30`                      |
+| `--config <file>`       | Project mappings for the job, saved as an absolute path                  |
+| `--time-zone <zone>`    | Pass a time zone when the scheduler may not have one                     |
+| `--provider <provider>` | Sync one provider only                                                   |
+| `--dry-run`             | Print the files and commands, and change nothing                         |
 
 `schedule status` shows the scheduler's own report, including the last run, and
 `schedule uninstall` removes the job and keeps your settings. A run's output is in
@@ -537,7 +544,7 @@ launcher in your token-ledger settings directory waits for sync to finish and
 passes its exit code back to Task Scheduler. Windows Script Host must be enabled.
 To update a task installed by an older CLI version, run
 `npx.cmd --yes @ponbac/token-ledger@latest schedule install` again, including any
-`--at`, `--config`, `--time-zone`, or `--provider` options you used before. This
+`--every`, `--at`, `--config`, `--time-zone`, or `--provider` options you used before. This
 replaces the existing task; your saved server and token are kept.
 
 | Platform | Scheduler           | A missed run                                           |
@@ -563,8 +570,8 @@ Without one, as on Alpine or in WSL with systemd disabled, use the cron entry be
 <details>
 <summary>Scheduling by hand</summary>
 
-`schedule install --dry-run` prints the exact files and commands for your machine.
-The examples below do the same with a login shell finding `npx`; if it is not on the
+`schedule install --dry-run` prints the exact files and commands for your machine,
+with the times for any `--every`. The examples below sync once a day. They do the same with a login shell finding `npx`; if it is not on the
 scheduler's `PATH`, use its absolute path or install the CLI globally with
 `npm install -g @ponbac/token-ledger` and run `token-ledger sync`.
 

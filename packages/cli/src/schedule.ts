@@ -16,9 +16,29 @@ export const TimeOfDay = Schema.String.check(Schema.isPattern(/^(?:[01]\d|2[0-3]
 /** A daily local time, `HH:MM` on a 24-hour clock. */
 export type TimeOfDay = typeof TimeOfDay.Type;
 
-/** What the scheduler runs each day. Paths are absolute, and nothing here is a credential. */
+/**
+ * `--every` values and their hours between syncs. Each divides a day, so every day syncs at
+ * the same times and a scheduler restarting its count at midnight keeps the interval.
+ */
+export const intervals = [
+  ["1h", 1],
+  ["2h", 2],
+  ["3h", 3],
+  ["4h", 4],
+  ["6h", 6],
+  ["8h", 8],
+  ["12h", 12],
+  ["24h", 24],
+] as const;
+
+/** Hours between scheduled syncs. */
+export type Interval = (typeof intervals)[number][1];
+
+/** What the scheduler runs, and when. Paths are absolute, and nothing here is a credential. */
 export interface ScheduledSync {
+  /** One of the times of day a sync runs; the others are `every` hours apart from it. */
   readonly at: TimeOfDay;
+  readonly every: Interval;
   /** Directory of the Node that ran `schedule install`, searched before the job's own `PATH`. */
   readonly nodeDirectory: string;
   /**
@@ -41,6 +61,23 @@ export interface ScheduledSync {
  */
 type Outcome = "required" | "reported" | "silent" | "absent";
 
+/** The local times, `HH:MM`, at which `job` syncs each day, earliest first. */
+export function syncTimes(job: Pick<ScheduledSync, "at" | "every">): ReadonlyArray<TimeOfDay> {
+  const hour = Number(job.at.slice(0, 2));
+  const minute = job.at.slice(3);
+
+  return Array.from(
+    { length: 24 / job.every },
+    (_, index) => `${String((hour % job.every) + index * job.every).padStart(2, "0")}:${minute}`,
+  );
+}
+
+/** When `job` syncs, for a sentence such as "Scheduled a sync ...". */
+export const describeTimes = (job: Pick<ScheduledSync, "at" | "every">) =>
+  job.every === 24
+    ? `daily at ${job.at}`
+    : `every ${job.every === 1 ? "hour" : `${job.every} hours`}, at ${syncTimes(job).join(", ")}`;
+
 /** One step of changing or inspecting the scheduler. */
 export type Action = Data.TaggedEnum<{
   Write: { readonly file: string; readonly contents: string };
@@ -58,7 +95,7 @@ export type Action = Data.TaggedEnum<{
 
 const Action = Data.taggedEnum<Action>();
 
-/** A platform's scheduler, as the actions that install, remove, and inspect the daily sync. */
+/** A platform's scheduler, as the actions that install, remove, and inspect the scheduled sync. */
 export interface Scheduler {
   readonly name: string;
   /** Fails with `ScheduleError` when a job value cannot be quoted for this scheduler. */
@@ -178,10 +215,12 @@ ExecStart=/bin/sh -lc ${systemdQuoted(posixScript(job))}
           Action.Write({
             file: timer,
             contents: `[Unit]
-Description=Daily AI usage sync
+Description=AI usage sync ${job.every === 24 ? "once a day" : `every ${job.every}h`}
 
 [Timer]
-OnCalendar=*-*-* ${job.at}:00
+OnCalendar=*-*-* ${syncTimes(job)
+              .map((time) => time.slice(0, 2))
+              .join(",")}:${job.at.slice(3)}:00
 Persistent=true
 RandomizedDelaySec=10m
 
@@ -234,7 +273,18 @@ export function launchAgent(home: string, uid: number): Scheduler {
     install: (job) =>
       posixJob(job).pipe(
         Effect.map((job) => {
-          const [hour, minute] = job.at.split(":").map(Number);
+          const times = syncTimes(job)
+            .map((time) => {
+              const [hour, minute] = time.split(":").map(Number);
+
+              return `    <dict>
+      <key>Hour</key>
+      <integer>${hour}</integer>
+      <key>Minute</key>
+      <integer>${minute}</integer>
+    </dict>`;
+            })
+            .join("\n");
 
           return [
             // Written first: a plist that cannot be written leaves the loaded agent running.
@@ -255,12 +305,9 @@ export function launchAgent(home: string, uid: number): Scheduler {
   <key>RunAtLoad</key>
   <true/>
   <key>StartCalendarInterval</key>
-  <dict>
-    <key>Hour</key>
-    <integer>${hour}</integer>
-    <key>Minute</key>
-    <integer>${minute}</integer>
-  </dict>
+  <array>
+${times}
+  </array>
   <key>StandardOutPath</key>
   <string>${xmlText(log)}</string>
   <key>StandardErrorPath</key>
@@ -336,7 +383,14 @@ export function taskScheduler(file: string): Scheduler {
             "$ErrorActionPreference = 'Stop'",
             "$ProgressPreference = 'SilentlyContinue'",
             `$action = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument ${powershellString(`//B //Nologo //E:JScript "${file}"`)}`,
-            `$trigger = New-ScheduledTaskTrigger -Daily -At '${job.at}'`,
+            `$trigger = New-ScheduledTaskTrigger -Daily -At '${syncTimes(job)[0]}'`,
+            // A daily trigger takes its repetition from a one-time trigger's; repeating for
+            // the whole day hands over to the next day's first sync.
+            ...(job.every === 24
+              ? []
+              : [
+                  `$trigger.Repetition = (New-ScheduledTaskTrigger -Once -At '${syncTimes(job)[0]}' -RepetitionInterval (New-TimeSpan -Hours ${job.every}) -RepetitionDuration (New-TimeSpan -Days 1)).Repetition`,
+                ]),
             "$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries",
             `Register-ScheduledTask -TaskName ${powershellString(task)} -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null`,
           ].join("\n");
