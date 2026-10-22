@@ -384,12 +384,13 @@ export function taskScheduler(file: string): Scheduler {
             "$ProgressPreference = 'SilentlyContinue'",
             `$action = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument ${powershellString(`//B //Nologo //E:JScript "${file}"`)}`,
             `$trigger = New-ScheduledTaskTrigger -Daily -At '${syncTimes(job)[0]}'`,
-            // A daily trigger takes its repetition from a one-time trigger's; repeating for
-            // the whole day hands over to the next day's first sync.
+            // A daily trigger takes its repetition from a one-time trigger's. Repetition also
+            // fires at the end of its duration, so it ends at the day's last sync rather than
+            // at the next day's first, which the daily trigger starts.
             ...(job.every === 24
               ? []
               : [
-                  `$trigger.Repetition = (New-ScheduledTaskTrigger -Once -At '${syncTimes(job)[0]}' -RepetitionInterval (New-TimeSpan -Hours ${job.every}) -RepetitionDuration (New-TimeSpan -Days 1)).Repetition`,
+                  `$trigger.Repetition = (New-ScheduledTaskTrigger -Once -At '${syncTimes(job)[0]}' -RepetitionInterval (New-TimeSpan -Hours ${job.every}) -RepetitionDuration (New-TimeSpan -Hours ${24 - job.every})).Repetition`,
                 ]),
             "$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries",
             `Register-ScheduledTask -TaskName ${powershellString(task)} -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null`,

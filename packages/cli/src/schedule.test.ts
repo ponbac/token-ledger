@@ -327,7 +327,7 @@ suite("Task Scheduler task", () => {
         assert.include(script, "-Daily -At '01:05'");
         assert.include(
           script,
-          "$trigger.Repetition = (New-ScheduledTaskTrigger -Once -At '01:05' -RepetitionInterval (New-TimeSpan -Hours 6) -RepetitionDuration (New-TimeSpan -Days 1)).Repetition",
+          "$trigger.Repetition = (New-ScheduledTaskTrigger -Once -At '01:05' -RepetitionInterval (New-TimeSpan -Hours 6) -RepetitionDuration (New-TimeSpan -Hours 18)).Repetition",
         );
         assert.include(
           script,
@@ -460,7 +460,7 @@ suite("Task Scheduler task", () => {
           ChildProcess.make("powershell.exe", powershellArguments(trigger), { stdin: "ignore" }),
         );
 
-        assert.match(output.trim(), /T01:05:00\S* PT6H P1D$/);
+        assert.match(output.trim(), /T01:05:00\S* PT6H PT18H$/);
       }).pipe(Effect.provide(NodeServices.layer)),
     // A cold PowerShell takes seconds to load the ScheduledTasks module on CI runners.
     30_000,
