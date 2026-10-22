@@ -79,18 +79,20 @@ export const opencodeDatabaseLines = Effect.fn("Opencode.readDatabase")(function
       });
 
     // A session's working directory, and when it began: a fork's copies predate their session.
-    const sessions = ["session", "session_v2"].filter((table) =>
-      has(table, "id", "directory", "time_created"),
-    );
+    // Each store prefers its own generation's session row, which may have diverged from the other.
+    const sessions = (alias: string) =>
+      (alias === "v" ? ["session_v2", "session"] : ["session", "session_v2"]).filter((table) =>
+        has(table, "id", "directory", "time_created"),
+      );
 
     const joins = (alias: string) =>
-      sessions
+      sessions(alias)
         .map((table, index) => `LEFT JOIN ${table} s${index} ON s${index}.id = ${alias}.session_id`)
         .join(" ");
 
     // The first session table holding the session; SQLite's COALESCE takes two or more.
-    const sessionField = (field: string) =>
-      `COALESCE(${[...sessions.map((_, index) => `s${index}.${field}`), "NULL"].join(", ")})`;
+    const sessionField = (alias: string, field: string) =>
+      `COALESCE(${[...sessions(alias).map((_, index) => `s${index}.${field}`), "NULL"].join(", ")})`;
 
     const line = (alias: string, role: string, provider: string, model: string, cwd: string) =>
       `json_object(
@@ -103,8 +105,8 @@ export const opencodeDatabaseLines = Effect.fn("Opencode.readDatabase")(function
         'cost', json_extract(${alias}.data, '$.cost'),
         'tokens', ${tokens(`${alias}.data`)},
         'path', json_object('cwd', ${cwd}),
-        'directory', ${sessionField("directory")},
-        'forked', json(CASE WHEN ${alias}.time_created < ${sessionField("time_created")} THEN 'true' ELSE 'false' END)
+        'directory', ${sessionField(alias, "directory")},
+        'forked', json(CASE WHEN ${alias}.time_created < ${sessionField(alias, "time_created")} THEN 'true' ELSE 'false' END)
       ) AS line, ${alias}.time_created AS created, ${alias}.id AS id`;
 
     const queries = [

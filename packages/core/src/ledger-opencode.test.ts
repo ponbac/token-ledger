@@ -686,6 +686,59 @@ describe("OpenCode usage through the Ledger", () => {
     }).pipe(Effect.provide(runtime)),
   );
 
+  it.effect("takes each store's session from its own generation when the two diverge", () =>
+    Effect.gen(function* () {
+      const { request, root, path, database } = yield* history();
+
+      const file = yield* Effect.gen(function* () {
+        const { file, db } = yield* database("diverged.db", schema);
+
+        yield* Effect.sync(() => {
+          // The same session, moved to B after the v2 store took it over.
+          db.prepare("INSERT INTO session VALUES (?, ?, ?)").run(
+            "ses_moved",
+            path.join(root, "work", "a"),
+            at("09:00:00"),
+          );
+          db.prepare("INSERT INTO session_v2 VALUES (?, ?, ?, NULL)").run(
+            "ses_moved",
+            path.join(root, "work", "b"),
+            at("09:30:00"),
+          );
+          db.prepare("INSERT INTO message VALUES (?, ?, ?, ?, ?)").run(
+            "msg_v1",
+            "ses_moved",
+            at("09:15:00"),
+            at("09:15:00"),
+            JSON.stringify(assistant("09:15:00", "anthropic", "v1-model", tokens(1, 1))),
+          );
+          db.prepare("INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?, ?)").run(
+            "v2_step",
+            "ses_moved",
+            "assistant",
+            1,
+            at("10:00:00"),
+            at("10:00:00"),
+            JSON.stringify(stepData("10:00:00", "anthropic", "v2-model", tokens(1, 1))),
+          );
+        });
+
+        return file;
+      }).pipe(Effect.scoped);
+
+      const result = yield* report({ ...request, sources: [{ provider: "opencode", path: file }] });
+
+      // Neither message predates its own generation's session, so neither is a fork's copy.
+      assert.deepStrictEqual(
+        result.rows.map((row) => [row.project, row.model, row.records]),
+        [
+          ["A", "v1-model", 1],
+          ["B", "v2-model", 1],
+        ],
+      );
+    }).pipe(Effect.provide(runtime)),
+  );
+
   it.effect("reads legacy history wherever a source is rooted, in any order of sources", () =>
     Effect.gen(function* () {
       const { fs, path, root, data, write } = yield* fixture();
