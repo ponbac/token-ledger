@@ -45,16 +45,73 @@ export interface ProjectMapping extends Schema.Schema.Type<typeof ProjectMapping
 
 const Rate = Schema.Number.check(Schema.isFinite(), Schema.isGreaterThanOrEqualTo(0));
 
-/** USD per million tokens; absent cache pricing stays unknown, never silently free. */
-export const ModelPrice = Schema.Struct({
+const rateFields = {
   input: Rate,
   output: Rate,
   cacheRead: Schema.NullOr(Rate),
   cacheWrite: Schema.NullOr(Rate),
+  // Claude's one-hour cache writes; without it they cost what other cache writes do.
+  cacheWrite1h: Schema.optionalKey(Rate),
+};
+
+/** USD per million tokens of each kind; absent cache pricing stays unknown, never silently free. */
+export const Rates = Schema.Struct(rateFields);
+
+/** One tier's rates, such as a price's base tier. */
+export interface Rates extends Schema.Schema.Type<typeof Rates> {}
+
+/**
+ * Rates for a request whose context, `input + cacheRead + cacheWrite`, exceeds `above` tokens.
+ * They apply to the whole request, as OpenAI, Anthropic, and GitHub Copilot bill long context.
+ */
+export const PriceTier = Schema.Struct({
+  above: Schema.Int.check(Schema.isGreaterThan(0)),
+  ...rateFields,
 });
+
+/** A long-context tier. */
+export interface PriceTier extends Schema.Schema.Type<typeof PriceTier> {}
+
+/**
+ * How uncached input is billed when a record reports no cache writes. `cacheWrite`: the
+ * provider wrote it to the cache implicitly, as OpenAI's GPT-5.6 and later do and GitHub
+ * Copilot bills, so all but three tokens are priced at the cache-write rate. `input`: at the
+ * input rate, for providers whose clients report their cache writes.
+ */
+export const UncachedInput = Schema.Literals(["cacheWrite", "input"]);
+
+/** The billing rule for uncached input. */
+export type UncachedInput = typeof UncachedInput.Type;
+
+/**
+ * USD per million tokens at the base tier, with optional long-context tiers. The tier is chosen
+ * per request: the highest whose `above` is below its context. `uncachedInput` defaults to
+ * `input`. Absent cache pricing stays unknown, never silently free.
+ */
+export const ModelPrice = Schema.Struct({
+  ...rateFields,
+  tiers: Schema.optionalKey(Schema.Array(PriceTier)),
+  uncachedInput: Schema.optionalKey(UncachedInput),
+}).check(
+  Schema.makeFilter(
+    (price) =>
+      new Set((price.tiers ?? []).map((tier) => tier.above)).size === (price.tiers ?? []).length,
+    { expected: "long-context tiers with distinct thresholds" },
+  ),
+);
 
 /** One explicit API-equivalent rate, not a subscription or credit price. */
 export interface ModelPrice extends Schema.Schema.Type<typeof ModelPrice> {}
+
+/**
+ * Which pricing method, Copilot rate card, and configuration overrides priced a run, opaque to
+ * the server and compared for equality. Absent when the run used no vendor rates, so such a run
+ * never claims the current basis.
+ */
+export const PricingBasis = Schema.String.check(Schema.isPattern(/^[\x21-\x7e]{1,128}$/));
+
+/** A pricing basis: printable ASCII, 1 to 128 characters. */
+export type PricingBasis = typeof PricingBasis.Type;
 
 /** Optional source overrides replace auto-discovery; project mappings and prices are additive. */
 export const Configuration = Schema.Struct({
@@ -67,12 +124,16 @@ export const Configuration = Schema.Struct({
 /** The serialized configuration accepted by both CLI and future applications. */
 export interface Configuration extends Schema.Schema.Type<typeof Configuration> {}
 
-/** Pricing provenance travels with every report for reproducible interpretation. */
+/**
+ * Pricing provenance travels with every report for reproducible interpretation. `basis` is set
+ * only on a book whose vendor rates were fetched or cached, never on a downloaded snapshot.
+ */
 export const PriceBook = Schema.Struct({
   status: Schema.Literals(["fresh", "cached", "unavailable", "custom"]),
   fetchedAt: Schema.NullOr(Schema.String),
   source: Schema.String,
   prices: Schema.Record(Schema.String, ModelPrice),
+  basis: Schema.optionalKey(PricingBasis),
 });
 
 /** A decoded rate snapshot. */
@@ -98,6 +159,13 @@ export interface UsageRecord {
   readonly cwd: string | null;
   readonly repository: RepositoryReference | null;
   readonly tokens: Tokens;
+  /** How many of `tokens.cacheWrite` were one-hour cache writes; at most that many. Claude only. */
+  readonly cacheWrite1h?: number;
+  /**
+   * The record sums several requests, as a Grok turn or Pi's tool usage can, so its context
+   * says nothing about any one request's: it is priced at the base tier.
+   */
+  readonly aggregate?: boolean;
 }
 
 /** Zone-free `YYYY-MM-DD` calendar day. Invalid dates such as February 30 are rejected. */
@@ -156,7 +224,8 @@ export const ReportRow = Schema.Struct({
   day: Day,
   provider: Provider,
   model: Schema.String,
-  pricePerMillion: Schema.NullOr(ModelPrice),
+  // The base tier; a request with a longer context may have been priced at a higher one.
+  pricePerMillion: Schema.NullOr(Rates),
   tokens: Tokens,
   records: Schema.Natural,
   estimatedCostUsd: Schema.NullOr(Schema.Number),
@@ -179,6 +248,7 @@ export const UsageReport = Schema.Struct({
     status: PriceBook.fields.status,
     fetchedAt: PriceBook.fields.fetchedAt,
     source: Schema.String,
+    basis: PriceBook.fields.basis,
   }),
   rows: Schema.Array(ReportRow),
   coverage: Schema.Array(Coverage),

@@ -7,11 +7,12 @@ import {
   BillingProvider,
   Coverage,
   PriceBook,
+  PricingBasis,
   Provider,
   Tokens,
   type UsageRecord,
 } from "./model.ts";
-import { type UsageTotals, addUsage, lookupPrice, priceTokens } from "./pricing.ts";
+import { type Pricer, type UsageTotals, addUsage, priceRecord } from "./pricing.ts";
 
 const hour = 3_600_000;
 
@@ -161,7 +162,9 @@ export function payloadVersion(buckets: readonly SyncBucket[]): SyncPayload["ver
  * The window is on whole UTC hours, and every bucket and plan hint lies inside it and belongs
  * to a replaced provider. Buckets from different machines are summed. `timeZone` is for display
  * only; all instants are UTC. `snapshotAt`, when present, is when the history scan began: the
- * server refuses an upload older than the last it applied from the machine.
+ * server refuses an upload older than the last it applied from the machine. `pricing.basis`,
+ * when present, names the pricing method, Copilot rate card, and configuration overrides that
+ * priced every bucket; the server stores it with each bucket it writes.
  */
 export const SyncPayload = Schema.Struct({
   version: Schema.Literals([1, 2, 3]),
@@ -177,6 +180,8 @@ export const SyncPayload = Schema.Struct({
     status: PriceBook.fields.status,
     fetchedAt: Schema.NullOr(UtcInstant),
     source: Text,
+    // Any version may carry it; servers that do not store it ignore it.
+    basis: Schema.optionalKey(PricingBasis),
   }),
   buckets: Schema.Array(SyncBucket),
   coverage: Schema.Array(SyncCoverage),
@@ -189,16 +194,7 @@ export const SyncPayload = Schema.Struct({
       (payload.version >= 2 ||
         payload.buckets.every((bucket) => bucket.billingProvider === undefined)) &&
       (payload.version >= 3 || !payload.buckets.some(partlyPriced)) &&
-      distinct(payload.buckets, (bucket) =>
-        JSON.stringify([
-          bucket.hourStart,
-          bucket.sessionKey,
-          bucket.project,
-          bucket.provider,
-          bucket.billingProvider ?? null,
-          bucket.model,
-        ]),
-      ) &&
+      distinct(payload.buckets, bucketKey) &&
       distinct(payload.coverage, (entry) => entry.provider) &&
       distinct(payload.providerHints ?? [], (hint) =>
         JSON.stringify([hint.provider, hint.hourStart, hint.plan]),
@@ -222,6 +218,84 @@ export const SyncPayload = Schema.Struct({
 
 /** Aggregated, path-free usage for one machine; contains no prompts, responses, or requests. */
 export interface SyncPayload extends Schema.Schema.Type<typeof SyncPayload> {}
+
+/** The most buckets one reprice-only upload carries; the server refuses more. */
+export const maxRepriceBuckets = 20_000;
+
+/**
+ * Version 1 reprice-only upload for `POST /ai-usage/machines/{machineId}/repricing`: new costs
+ * for buckets the server already stores. Each bucket is an upload bucket with version 3 costs,
+ * built as an upload builds it. From the server's reprice floor on, a stored bucket of the
+ * machine with the same key, the same four token counts, and the same record count takes the
+ * bucket's cost, unpriced record count, and `pricing.basis`; the server never inserts or
+ * deletes a bucket, so history pruned on the machine keeps its stored cost. Bucket keys are
+ * unique, and a request holds at most `maxRepriceBuckets` buckets.
+ */
+export const RepricePayload = Schema.Struct({
+  version: Schema.Literal(1),
+  clientVersion: NonEmptyText,
+  pricing: Schema.Struct({
+    status: PriceBook.fields.status,
+    fetchedAt: Schema.NullOr(UtcInstant),
+    source: Text,
+    basis: PricingBasis,
+  }),
+  buckets: Schema.Array(SyncBucket).check(Schema.isMaxLength(maxRepriceBuckets)),
+}).check(
+  Schema.makeFilter((payload) => distinct(payload.buckets, bucketKey), {
+    expected: "unique bucket keys",
+  }),
+);
+
+/** New costs for stored buckets; like an upload, it contains no prompts, paths, or requests. */
+export interface RepricePayload extends Schema.Schema.Type<typeof RepricePayload> {}
+
+/**
+ * JSON per reprice request, well inside the server's 16 MiB body limit even for the longest
+ * project and model names.
+ */
+const maxRepriceBytes = 12 * 1024 * 1024;
+
+/**
+ * Splits buckets, in order, into consecutive reprice requests of at most `maxRepriceBuckets`
+ * buckets and `maxRepriceBytes` of bucket JSON each. Every request holds at least one bucket,
+ * and no bucket is lost or repeated; no buckets make no requests.
+ */
+export function repriceChunks(buckets: readonly SyncBucket[]): SyncBucket[][] {
+  const chunks: SyncBucket[][] = [];
+  let chunk: SyncBucket[] = [];
+  let bytes = 0;
+
+  for (const bucket of buckets) {
+    // The comma between array elements counts too.
+    const size = Buffer.byteLength(JSON.stringify(bucket)) + 1;
+
+    if (chunk.length > 0 && (chunk.length >= maxRepriceBuckets || bytes + size > maxRepriceBytes)) {
+      chunks.push(chunk);
+      chunk = [];
+      bytes = 0;
+    }
+
+    chunk.push(bucket);
+    bytes += size;
+  }
+
+  if (chunk.length > 0) chunks.push(chunk);
+
+  return chunks;
+}
+
+/** A bucket's identity: `(hourStart, sessionKey, project, provider, billingProvider, model)`. */
+function bucketKey(bucket: SyncBucket): string {
+  return JSON.stringify([
+    bucket.hourStart,
+    bucket.sessionKey,
+    bucket.project,
+    bucket.provider,
+    bucket.billingProvider ?? null,
+    bucket.model,
+  ]);
+}
 
 function distinct<A>(items: readonly A[], key: (item: A) => string): boolean {
   return new Set(items.map(key)).size === items.length;
@@ -252,9 +326,10 @@ function sessionKey(provider: Provider, session: string): string {
 
 /**
  * Sums streamed records into hourly session buckets, keeping memory proportional to buckets
- * rather than records. `finish` returns them in a stable order.
+ * rather than records. Each record is priced before it is summed, so its own context chooses its
+ * tier. `finish` returns them in a stable order.
  */
-export function sessionBuckets(pricing: PriceBook) {
+export function sessionBuckets(pricer: Pricer) {
   const totals = new Map<
     string,
     {
@@ -282,7 +357,7 @@ export function sessionBuckets(pricing: PriceBook) {
       ]);
 
       const previous = totals.get(key);
-      const cost = priceTokens(record.tokens, lookupPrice(pricing, record.model));
+      const cost = priceRecord(record, pricer).usd;
 
       totals.set(key, {
         record: previous?.record ?? record,

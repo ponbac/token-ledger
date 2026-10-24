@@ -753,6 +753,110 @@ describe("Ledger reports through the public interface", () => {
     }).pipe(Effect.provide(runtime)),
   );
 
+  it.effect("prices Claude's one-hour cache writes and Grok turns without changing tokens", () =>
+    Effect.gen(function* () {
+      const { write } = yield* fixture();
+
+      const claude = (id: string, cacheCreation: Readonly<Record<string, number>> | string) =>
+        JSON.stringify({
+          type: "assistant",
+          timestamp: "2026-09-22T10:00:00Z",
+          sessionId: "claude-session",
+          requestId: id,
+          message: {
+            id,
+            model: "claude-model",
+            usage: {
+              input_tokens: 40,
+              cache_read_input_tokens: 60,
+              cache_creation_input_tokens: 10,
+              cache_creation: cacheCreation,
+              output_tokens: 20,
+            },
+          },
+        });
+
+      const claudeFile = yield* write("claude.jsonl", [
+        claude("one-hour", { ephemeral_5m_input_tokens: 4, ephemeral_1h_input_tokens: 6 }),
+        // An unexpected breakdown keeps the request, priced at the five-minute rate.
+        claude("unexpected", "not-a-breakdown"),
+      ]);
+
+      // A turn sums its requests, so its 300,100-token context does not choose the long tier.
+      const grokFile = yield* write("grok.jsonl", [
+        JSON.stringify({
+          params: {
+            sessionId: "grok-session",
+            _meta: { agentTimestampMs: Date.parse("2026-09-22T10:00:00Z") },
+            update: {
+              sessionUpdate: "turn_completed",
+              prompt_id: "prompt",
+              usage: {
+                inputTokens: 300_100,
+                outputTokens: 10,
+                modelUsage: {
+                  "grok-model": {
+                    inputTokens: 300_100,
+                    cachedReadTokens: 300_000,
+                    outputTokens: 10,
+                  },
+                },
+              },
+            },
+          },
+        }),
+      ]);
+
+      const ledger = yield* Ledger;
+
+      const report = yield* ledger.report({
+        ...request([
+          { provider: "claude", path: claudeFile },
+          { provider: "grok", path: grokFile },
+        ]),
+        pricing: PriceBook.make({
+          status: "custom",
+          fetchedAt: null,
+          source: "test-fixture",
+          prices: {
+            "claude-model": {
+              input: 2,
+              output: 10,
+              cacheRead: 0.2,
+              cacheWrite: 3,
+              cacheWrite1h: 5,
+            },
+            "grok-model": {
+              input: 1,
+              output: 2,
+              cacheRead: 0.1,
+              cacheWrite: null,
+              tiers: [{ above: 272_000, input: 10, output: 20, cacheRead: 1, cacheWrite: null }],
+            },
+          },
+        }),
+      });
+
+      const claudeRow = report.rows.find((row) => row.provider === "claude");
+      assert.deepStrictEqual(claudeRow?.tokens, {
+        input: 80,
+        cacheRead: 120,
+        cacheWrite: 20,
+        output: 40,
+      });
+      assert.closeTo(
+        claudeRow?.estimatedCostUsd ?? -1,
+        (40 * 2 + 60 * 0.2 + 4 * 3 + 6 * 5 + 20 * 10 + (40 * 2 + 60 * 0.2 + 10 * 3 + 20 * 10)) /
+          1e6,
+        1e-12,
+      );
+      assert.strictEqual(claudeRow?.pricePerMillion?.cacheWrite1h, 5);
+
+      const grokRow = report.rows.find((row) => row.provider === "grok");
+      assert.closeTo(grokRow?.estimatedCostUsd ?? -1, (100 + 300_000 * 0.1 + 10 * 2) / 1e6, 1e-12);
+    }).pipe(Effect.provide(runtime)),
+  );
+
   it.effect("attributes Copilot requests from later parent spans without crossing traces", () =>
     Effect.gen(function* () {
       const { write } = yield* fixture();
@@ -1105,6 +1209,118 @@ describe("Ledger sync payloads through the public interface", () => {
       assert.strictEqual(withoutHints.buckets[0]?.records, 2);
       assert.notInclude(JSON.stringify(withoutHints), "billingProvider");
     }).pipe(Effect.provide(runtime)),
+  );
+
+  it.effect(
+    "rebuilds one provider's older buckets for repricing exactly as an upload built them",
+    () =>
+      Effect.gen(function* () {
+        const { write, lastModified, root, path } = yield* fixture();
+
+        const usage = (timestamp: string, input: number) =>
+          JSON.stringify({
+            type: "event_msg",
+            timestamp,
+            payload: {
+              type: "token_count",
+              info: { last_token_usage: { input_tokens: input, output_tokens: 5 } },
+            },
+          });
+
+        // Last written well before the usual window, which an ordinary sync does not open.
+        const old = yield* write(
+          "codex/old.jsonl",
+          session("old", root, [
+            usage("2026-09-10T10:15:00Z", 10),
+            usage("2026-09-10T10:45:00Z", 20),
+          ]),
+        );
+
+        yield* lastModified(old, "2026-09-10T12:00:00Z");
+        yield* write("codex/new.jsonl", session("new", root, [usage("2026-09-22T12:00:00Z", 30)]));
+
+        const copilot = yield* write("otel/events.jsonl", [
+          inference("routed"),
+          inference("ordinary"),
+        ]);
+
+        yield* write("hints/chatgpt-proxy.jsonl", [
+          JSON.stringify({ requestId: "routed", billingProvider: "codex", authMode: "chatgpt" }),
+        ]);
+
+        const ledger = yield* Ledger;
+
+        const input = {
+          ...request([
+            { provider: "codex", path: path.join(root, "codex") },
+            { provider: "copilot", path: copilot },
+          ]),
+          billingHints: { directory: path.join(root, "hints"), required: false },
+        };
+
+        const stored = yield* ledger.syncPayload(input, client);
+        const usual = yield* ledger.syncPayload({ ...input, since: "2026-09-21" }, client);
+
+        assert.deepStrictEqual(
+          usual.coverage.map((entry) => [entry.provider, entry.files, entry.filesBeforeWindow]),
+          [
+            ["codex", 1, 1],
+            ["copilot", 1, 0],
+          ],
+        );
+
+        const before = {
+          start: Date.parse("2026-09-10T10:00:00Z"),
+          end: Date.parse(usual.window.start),
+        };
+
+        const codex = yield* ledger.repriceBuckets(input, "codex", before);
+
+        assert.deepStrictEqual(
+          codex.buckets,
+          stored.buckets.filter(
+            (bucket) => bucket.provider === "codex" && bucket.hourStart < usual.window.start,
+          ),
+        );
+        assert.deepStrictEqual(
+          codex.buckets.map((bucket) => [bucket.hourStart, bucket.records]),
+          [["2026-09-10T10:00:00.000Z", 2]],
+        );
+        assert.deepStrictEqual(
+          [codex.coverage.provider, codex.coverage.status, codex.coverage.filesBeforeWindow],
+          ["codex", "ok", 0],
+        );
+
+        // Billing hints are read as for an upload, so routed requests keep their payer.
+        const routed = yield* ledger.repriceBuckets(input, "copilot", {
+          start: Date.parse("2026-09-22T10:00:00Z"),
+          end: Date.parse("2026-09-22T11:00:00Z"),
+        });
+
+        assert.deepStrictEqual(
+          routed.buckets,
+          stored.buckets.filter((bucket) => bucket.provider === "copilot"),
+        );
+        assert.deepStrictEqual(
+          routed.buckets.map((bucket) => bucket.billingProvider ?? null),
+          [null, "codex"],
+        );
+
+        const absent = yield* ledger.repriceBuckets(input, "claude", before);
+
+        assert.deepStrictEqual(absent.buckets, []);
+        assert.strictEqual(absent.coverage.status, "missing");
+
+        for (const range of [
+          { start: before.start + 1, end: before.end },
+          { start: before.end, end: before.end },
+          { start: before.end, end: before.start },
+        ]) {
+          const invalid = yield* ledger.repriceBuckets(input, "codex", range).pipe(Effect.result);
+
+          assert.isTrue(Result.isFailure(invalid));
+        }
+      }).pipe(Effect.provide(runtime)),
   );
 
   it.effect("attributes a routed request to the proxy's repository when Copilot names none", () =>
@@ -1716,6 +1932,70 @@ describe("Ledger sync payloads through the public interface", () => {
         payload.buckets.reduce((sum, bucket) => sum + bucket.records, 0),
         4,
       );
+    }).pipe(Effect.provide(runtime)),
+  );
+
+  it.effect("bills Pi's GitHub Copilot route to Copilot and carries the pricing basis", () =>
+    Effect.gen(function* () {
+      const { write } = yield* fixture();
+
+      const file = yield* write("pi.jsonl", [
+        JSON.stringify({ type: "session", version: 3, id: "pi-session" }),
+        piMessage(
+          "c0000001",
+          "09:10:00",
+          "assistant",
+          piUsage(1_000, 100),
+          "claude-sonnet-4.6",
+          "github-copilot",
+        ),
+        // Nested tool work names no route or model.
+        piMessage("c0000002", "09:20:00", "toolResult", piUsage(10, 5)),
+      ]);
+
+      const ledger = yield* Ledger;
+
+      const input = {
+        ...request([{ provider: "pi", path: file }]),
+        since: "2026-09-22",
+        until: "2026-09-22",
+        pricing: PriceBook.make({
+          status: "fresh",
+          fetchedAt: "2026-09-22T00:00:00.000Z",
+          source: "test-fixture",
+          prices: {
+            "github_copilot/claude-sonnet-4.6": {
+              input: 3,
+              output: 15,
+              cacheRead: 0.3,
+              cacheWrite: 3.75,
+            },
+          },
+          basis: "fixture-basis@1",
+        }),
+      };
+
+      const payload = yield* ledger.syncPayload(input, client);
+      assert.strictEqual(payload.version, 2);
+      assert.strictEqual(payload.pricing.basis, "fixture-basis@1");
+      assert.deepStrictEqual(payload.providerHints, []);
+      assert.deepStrictEqual(
+        payload.buckets.map((bucket) => [
+          bucket.model,
+          bucket.billingProvider ?? null,
+          bucket.estimatedCostUsd,
+        ]),
+        [
+          ["claude-sonnet-4.6", "copilot", (1_000 * 3 + 100 * 15) / 1e6],
+          ["unknown", null, null],
+        ],
+      );
+
+      const report = yield* ledger.report(input);
+      assert.strictEqual(report.pricing.basis, "fixture-basis@1");
+
+      const legacy = yield* ledger.syncPayload(request([{ provider: "pi", path: file }]), client);
+      assert.notProperty(legacy.pricing, "basis");
     }).pipe(Effect.provide(runtime)),
   );
 

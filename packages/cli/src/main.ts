@@ -7,13 +7,12 @@ import { Ledger } from "@token-ledger/core/ledger";
 import {
   Configuration,
   Day,
-  PriceBook,
   ProjectName,
   type Provider,
   ReportRequest,
   type Source,
 } from "@token-ledger/core/model";
-import { loadPrices } from "@token-ledger/core/pricing";
+import { configuredPricing, loadPrices } from "@token-ledger/core/pricing";
 import { opencodeDatabaseName } from "@token-ledger/core/providers/opencode-db";
 import type { SyncPayload } from "@token-ledger/core/sync";
 import {
@@ -44,7 +43,8 @@ import {
   plan as planEnabling,
   summarize,
 } from "./copilot.ts";
-import { csv, syncSummary, table } from "./format.ts";
+import { csv, repriceLine, syncSummary, table, unpricedModels } from "./format.ts";
+import { repriceStoredUsage } from "./reprice.ts";
 import {
   TimeOfDay,
   describe,
@@ -275,20 +275,13 @@ const usageRequest = Effect.fn("CLI.usageRequest")(function* (
     Config.withDefault(path.join(home, ".cache")),
   );
 
+  // Snapshots from before long-context tiers were decoded lack them, so they live elsewhere.
   const basePrices = yield* loadPrices(
-    path.join(expand(cacheRoot), "token-ledger", "prices.json"),
+    path.join(expand(cacheRoot), "token-ledger", "prices-v2.json"),
     flags.offline,
   );
 
-  const pricing =
-    configuration.prices === undefined
-      ? basePrices
-      : PriceBook.make({
-          ...basePrices,
-          status: "custom",
-          source: `${basePrices.source}; configuration overrides`,
-          prices: { ...basePrices.prices, ...configuration.prices },
-        });
+  const pricing = configuredPricing(basePrices, configuration.prices);
 
   if (pricing.status === "unavailable")
     yield* Console.error(
@@ -371,6 +364,10 @@ const report = Command.make(
           `${source.provider}: ${source.status}; ${source.files} files, ${source.filesBeforeWindow} older files not opened, ${source.malformedLines} malformed lines, ${source.skippedRecords} skipped records. ${source.warnings.join(" ")}`,
         );
     }
+
+    const unpriced = unpricedModels(result.rows);
+
+    if (unpriced !== undefined) yield* Console.error(unpriced);
 
     if (
       flags.strict &&
@@ -517,6 +514,10 @@ const sync = Command.make(
     if (flags.dryRun) {
       yield* Console.log(JSON.stringify(first.payload, null, 2));
 
+      const unpriced = unpricedModels(first.payload.buckets);
+
+      if (unpriced !== undefined) yield* Console.error(unpriced);
+
       if (flags.strict && incomplete) process.exitCode = 2;
 
       return;
@@ -616,9 +617,28 @@ const sync = Command.make(
       return;
     }
 
+    const unpriced = unpricedModels(sent.payload.buckets);
+
+    if (unpriced !== undefined) yield* Console.error(unpriced);
+
     yield* Console.log(
       syncSummary(sent.payload, { ...request, since: sent.since }, outcome.success),
     );
+
+    // Stored hours before the window may rest on an older pricing basis. Rebuilding them only
+    // changes the costs of buckets the server holds exactly as built here, and a reprice that
+    // does not finish leaves the sync's outcome alone; the next sync tries again.
+    const repriced = yield* repriceStoredUsage({
+      server: server.value,
+      token: token.value,
+      payload: sent.payload,
+      providers: new Set(request.sources.map((source) => source.provider)),
+      directory,
+      scan: (provider, range) => ledger.repriceBuckets(request, provider, range),
+    });
+
+    for (const { text, problem } of repriced.map(repriceLine))
+      yield* problem ? Console.error(text) : Console.log(text);
   }),
 ).pipe(
   Command.withDescription(

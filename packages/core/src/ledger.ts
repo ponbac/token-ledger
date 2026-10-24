@@ -20,6 +20,8 @@ import { type ChatgptRequest, readBillingHints } from "./billing-hints.ts";
 import {
   type Coverage,
   type Day,
+  type PriceBook,
+  type Provider,
   ReportRequest,
   UsageReport,
   totalTokens,
@@ -27,7 +29,7 @@ import {
   type Source,
   type UsageRecord,
 } from "./model.ts";
-import { addUsage, lookupPrice, priceTokens } from "./pricing.ts";
+import { addUsage, priceRecord, pricerFor } from "./pricing.ts";
 import { type Attribution, projectResolver } from "./projects.ts";
 import { claudeParser } from "./providers/claude.ts";
 import { codexParser } from "./providers/codex.ts";
@@ -44,7 +46,9 @@ import { piParser } from "./providers/pi.ts";
 import type { ParseResult } from "./providers/shared.ts";
 import {
   type ObservedPlan,
+  type SyncBucket,
   SyncClient,
+  type SyncCoverage,
   SyncPayload,
   hourRange,
   payloadVersion,
@@ -84,6 +88,14 @@ export interface HistoryPayload {
 /** Local diagnostics for the calling application; never part of the upload payload. */
 type WarningSink = (message: string) => Effect.Effect<void>;
 
+/** One provider's buckets for a reprice-only upload, and how completely its history was read. */
+export interface RepriceScan {
+  /** Empty unless `coverage` is `ok` or `partial`, as an upload would leave them out. */
+  readonly buckets: readonly SyncBucket[];
+  /** `missing` when no source names the provider. */
+  readonly coverage: SyncCoverage;
+}
+
 /** Produces complete or explicitly partial reports, hiding scanning and provider-specific accounting. */
 export class Ledger extends Context.Service<
   Ledger,
@@ -106,6 +118,19 @@ export class Ledger extends Context.Service<
       client: SyncClient,
       onWarning?: WarningSink,
     ) => Effect.Effect<HistoryPayload, InvalidRequest>;
+    /**
+     * One provider's hourly session buckets in `range`, half-open on whole UTC hours, built as
+     * `syncPayload` builds an upload's: the same sources, project mappings, billing hints,
+     * prices, and keys, so they match the buckets earlier syncs stored for those hours. Every
+     * file that can hold usage from `range.start` on is opened, however long before the usual
+     * window that is. Meant for reprice-only uploads of hours before a sync's window; plan
+     * hints are not collected, and diagnostics are left to the sync that preceded it.
+     */
+    readonly repriceBuckets: (
+      request: ReportRequest,
+      provider: Provider,
+      range: InstantRange,
+    ) => Effect.Effect<RepriceScan, InvalidRequest>;
   }
 >()("token-ledger/Ledger") {
   /** Filesystem implementation. All mutable aggregation and deduplication state belongs to a single call. */
@@ -428,18 +453,21 @@ export class Ledger extends Context.Service<
         const request = yield* decode(input);
         const window = dayWindow(request.since, request.until, request.timeZone);
         const rows = new Map<string, ReportRow>();
+        const pricer = pricerFor(request.pricing);
 
+        // No billing hints are read here, so a Copilot request routed to a ChatGPT plan is
+        // priced as Copilot-paid, with Copilot's rate card.
         const coverage = yield* scan(request, window, window.dayOf, (record, { project }, day) => {
           const key = JSON.stringify([project, day, record.provider, record.model]);
-          const price = lookupPrice(request.pricing, record.model);
+          const { usd, base } = priceRecord(record, pricer);
 
           rows.set(key, {
             project,
             day,
             provider: record.provider,
             model: record.model,
-            pricePerMillion: price ?? null,
-            ...addUsage(rows.get(key), record.tokens, priceTokens(record.tokens, price)),
+            pricePerMillion: base,
+            ...addUsage(rows.get(key), record.tokens, usd),
           });
         });
 
@@ -450,11 +478,7 @@ export class Ledger extends Context.Service<
           timeZone: request.timeZone.id,
           currency: "USD",
           costBasis: "api-equivalent",
-          pricing: {
-            status: request.pricing.status,
-            fetchedAt: request.pricing.fetchedAt,
-            source: request.pricing.source,
-          },
+          pricing: provenance(request.pricing),
           rows: [...rows.values()].toSorted(
             (a, b) =>
               a.project.localeCompare(b.project) ||
@@ -487,7 +511,7 @@ export class Ledger extends Context.Service<
         const requested = hourRange(dayWindow(request.since, request.until, request.timeZone));
         // A history opens every file however old, and its window is settled afterwards.
         const from = history ? Math.min(historyFloor, requested.start) : requested.start;
-        const buckets = sessionBuckets(request.pricing);
+        const buckets = sessionBuckets(pricerFor(request.pricing));
         const hints = planHints();
         let earliest = requested.start;
         // Taken before reading, so the payload holds every record written before it. The server
@@ -500,7 +524,7 @@ export class Ledger extends Context.Service<
           (timestamp) => (timestamp >= from && timestamp < requested.end ? timestamp : undefined),
           (record, attribution, timestamp) => {
             earliest = Math.min(earliest, timestamp);
-            buckets.add(record, attribution.shareable ? attribution.project : unattributed);
+            buckets.add(record, uploadedProject(attribution));
           },
           (plan) => {
             earliest = Math.min(earliest, plan.timestamp);
@@ -536,11 +560,7 @@ export class Ledger extends Context.Service<
           },
           currency: "USD",
           costBasis: "api-equivalent",
-          pricing: {
-            status: request.pricing.status,
-            fetchedAt: request.pricing.fetchedAt,
-            source: request.pricing.source,
-          },
+          pricing: provenance(request.pricing),
           // Unread history must not replace stored usage with less; drop those providers.
           buckets: uploadedBuckets,
           coverage: summary,
@@ -558,15 +578,71 @@ export class Ledger extends Context.Service<
         return { payload, since };
       });
 
+      const repriceBuckets = Effect.fn("Ledger.repriceBuckets")(function* (
+        input: ReportRequest,
+        provider: Provider,
+        range: InstantRange,
+      ) {
+        const request = yield* decode(input);
+        const hours = hourRange(range);
+
+        if (hours.start !== range.start || hours.end !== range.end || range.start >= range.end)
+          return yield* new InvalidRequest({ message: "Expected a range of whole UTC hours." });
+
+        const buckets = sessionBuckets(pricerFor(request.pricing));
+
+        const coverage = yield* scan(
+          { ...request, sources: request.sources.filter((source) => source.provider === provider) },
+          range,
+          (timestamp) =>
+            timestamp >= range.start && timestamp < range.end ? timestamp : undefined,
+          (record, attribution) => buckets.add(record, uploadedProject(attribution)),
+          // Plan hints are not repriced. Noticing them still makes the scan read billing hints,
+          // as an upload's does, so each request keeps the payer its stored bucket has.
+          () => undefined,
+        );
+
+        const summary = providerCoverage(coverage).find((entry) => entry.provider === provider) ?? {
+          provider,
+          status: "missing",
+          files: 0,
+          filesBeforeWindow: 0,
+          unreadable: 0,
+          malformedLines: 0,
+          skippedRecords: 0,
+          duplicates: 0,
+        };
+
+        return {
+          buckets: replacedProviders([summary]).has(provider) ? buckets.finish() : [],
+          coverage: summary,
+        } satisfies RepriceScan;
+      });
+
       return Ledger.of({
         report,
         syncPayload: (request, client, onWarning) =>
           Effect.map(payloadFrom(request, client, false, onWarning), ({ payload }) => payload),
         historyPayload: (request, client, onWarning) =>
           payloadFrom(request, client, true, onWarning),
+        repriceBuckets,
       });
     }),
   );
+}
+
+/** The project an upload names: usage attributed only to a local path is `unattributed`. */
+function uploadedProject(attribution: Attribution): string {
+  return attribution.shareable ? attribution.project : unattributed;
+}
+
+/** A price book's provenance, without its rates, for reports and sync payloads. */
+function provenance(pricing: PriceBook) {
+  const { status, fetchedAt, source } = pricing;
+
+  return pricing.basis === undefined
+    ? { status, fetchedAt, source }
+    : { status, fetchedAt, source, basis: pricing.basis };
 }
 
 function acceptsFile(path: Path.Path, source: Source, file: string): boolean {

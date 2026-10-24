@@ -1,5 +1,15 @@
-import { SyncPayload } from "@token-ledger/core/sync";
-import { Effect, Match, Option, Predicate, type Redacted, Schedule, Schema } from "effect";
+import type { PricingBasis } from "@token-ledger/core/model";
+import { RepricePayload, SyncPayload } from "@token-ledger/core/sync";
+import {
+  type Duration,
+  Effect,
+  Match,
+  Option,
+  Predicate,
+  type Redacted,
+  Schedule,
+  Schema,
+} from "effect";
 import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 
 /** The server was unreachable, too slow, or temporarily failing after retries; a later run may succeed. */
@@ -200,4 +210,166 @@ export const hasUploaded = Effect.fn("Sync.hasUploaded")(function* (
       Effect.provideService(FetchHttpClient.RequestInit, { redirect: "error" }),
       Effect.mapError(() => unanswered),
     );
+});
+
+/**
+ * Repricing could not finish in this run: the server was unreachable, too slow, or temporarily
+ * failing after retries. The next sync asks again.
+ */
+export class RepricingUnavailable extends Schema.TaggedError<RepricingUnavailable>()(
+  "RepricingUnavailable",
+  { message: Schema.String },
+) {}
+
+/**
+ * The server refused a repricing request, or answered with something other than its own reply,
+ * as a server without repricing does (404). Sending it again in this run cannot succeed.
+ */
+export class RepricingRefused extends Schema.TaggedError<RepricingRefused>()("RepricingRefused", {
+  status: Schema.Number,
+  message: Schema.String,
+}) {}
+
+/**
+ * toki2's answer to which of a machine's stored usage another pricing basis priced. Per
+ * provider with stored usage: the earliest such hour from the reprice `floor` on (`from`, or
+ * `null` when there is none), and how many such buckets it stores. A provider this client does
+ * not know stays text, so a newer server's providers do not hide the rest.
+ */
+export const RepricingStatus = Schema.Struct({
+  floor: Schema.DateTimeUtcFromString,
+  providers: Schema.Array(
+    Schema.Struct({
+      provider: Schema.String,
+      from: Schema.NullOr(Schema.DateTimeUtcFromString),
+      staleBuckets: Schema.Natural,
+    }),
+  ),
+});
+
+/** Stored usage to reprice, per provider. */
+export interface RepricingStatus extends Schema.Schema.Type<typeof RepricingStatus> {}
+
+/**
+ * What a reprice request changed: stored buckets that took the new cost, also when it was
+ * equal already (`updated`); buckets from the floor on that matched none (`unmatched`); and
+ * buckets before the floor, which are never repriced (`beforeFloor`).
+ */
+export const RepricingReceipt = Schema.Struct({
+  updated: Schema.Natural,
+  unmatched: Schema.Natural,
+  beforeFloor: Schema.Natural,
+});
+
+/** The server's count of one reprice request's buckets. */
+export interface RepricingReceipt extends Schema.Schema.Type<typeof RepricingReceipt> {}
+
+/** Decodes a 2xx reply, and classifies every other status as transient or refused. */
+function repricingAnswer<A, E>(
+  response: HttpClientResponse.HttpClientResponse,
+  decode: (response: HttpClientResponse.HttpClientResponse) => Effect.Effect<A, E>,
+): Effect.Effect<A, RepricingUnavailable | RepricingRefused> {
+  const status = response.status;
+
+  if (status >= 200 && status < 300)
+    return decode(response).pipe(
+      Effect.mapError(
+        () => new RepricingRefused({ status, message: "The server's reply was not understood." }),
+      ),
+    );
+
+  if (status >= 500 || status === 408 || status === 429)
+    return Effect.fail(
+      new RepricingUnavailable({ message: `The server is temporarily unavailable (${status}).` }),
+    );
+
+  const message = Match.value(status).pipe(
+    Match.when(401, () => "The server rejected the API token."),
+    Match.when(403, () => "This API token may not reprice for this machine ID."),
+    Match.when(404, () => "The server does not offer repricing; it may need an update."),
+    Match.orElse(() => `The server refused the request (${status}).`),
+  );
+
+  return Effect.fail(new RepricingRefused({ status, message }));
+}
+
+/**
+ * Sends a repricing request to `server`, with one timeout covering headers and body per
+ * attempt. Transient failures are retried as an upload's are, re-sending the identical
+ * request; refusals are final.
+ */
+function exchange<A, E>(
+  server: URL,
+  request: HttpClientRequest.HttpClientRequest,
+  decode: (response: HttpClientResponse.HttpClientResponse) => Effect.Effect<A, E>,
+  timeout: Duration.Input,
+) {
+  return Effect.gen(function* () {
+    const client = (yield* HttpClient.HttpClient).pipe(HttpClient.withScope);
+
+    return yield* client.execute(request).pipe(
+      Effect.flatMap((response) => repricingAnswer(response, decode)),
+      Effect.scoped,
+      Effect.timeout(timeout),
+      Effect.catchTag(["HttpClientError", "TimeoutError"], () =>
+        Effect.fail(new RepricingUnavailable({ message: `Cannot reach ${server.origin}.` })),
+      ),
+      Effect.retry({
+        while: Predicate.isTagged("RepricingUnavailable"),
+        schedule: Schedule.exponential("2 seconds"),
+        times: 3,
+      }),
+    );
+  });
+}
+
+/**
+ * Asks toki2 which of the machine's stored usage another pricing basis than `basis` priced,
+ * per provider. Only the caller's own machine is described: an unknown machine has no
+ * providers. Errors never contain the token.
+ */
+export const repricingStatus = Effect.fn("Sync.repricingStatus")(function* (
+  server: URL,
+  token: Redacted.Redacted<string>,
+  machineId: string,
+  basis: PricingBasis,
+) {
+  return yield* exchange(
+    server,
+    HttpClientRequest.get(endpoint(server, `ai-usage/machines/${machineId}/repricing`)).pipe(
+      HttpClientRequest.setUrlParam("basis", basis),
+      HttpClientRequest.bearerToken(token),
+      HttpClientRequest.acceptJson,
+    ),
+    HttpClientResponse.schemaBodyJson(RepricingStatus),
+    "30 seconds",
+  );
+});
+
+/**
+ * POSTs new costs for buckets the server stores and returns its counts. The server changes
+ * only costs of exactly matching buckets, so sending the same request again changes nothing
+ * more, and retrying it is safe. Errors never contain the token.
+ */
+export const reprice = Effect.fn("Sync.reprice")(function* (
+  server: URL,
+  token: Redacted.Redacted<string>,
+  machineId: string,
+  payload: RepricePayload,
+) {
+  const request = yield* HttpClientRequest.post(
+    endpoint(server, `ai-usage/machines/${machineId}/repricing`),
+  ).pipe(
+    HttpClientRequest.bearerToken(token),
+    HttpClientRequest.acceptJson,
+    HttpClientRequest.schemaBodyJson(RepricePayload)(payload),
+    Effect.orDie,
+  );
+
+  return yield* exchange(
+    server,
+    request,
+    HttpClientResponse.schemaBodyJson(RepricingReceipt),
+    "60 seconds",
+  );
 });

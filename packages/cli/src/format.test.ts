@@ -1,7 +1,7 @@
 import { assert, it } from "@effect/vitest";
 import { ReportRow, UsageReport } from "@token-ledger/core/model";
 
-import { csv, table } from "./format.ts";
+import { csv, table, unpricedModels } from "./format.ts";
 
 function report(costs: readonly number[], unpriced = false) {
   return UsageReport.make({
@@ -67,4 +67,31 @@ it("exports the project summary as simple CSV with rounded costs and a total", (
   assert.include(partial, '"$10.00 + unknown","100.0%"');
   assert.include(csv(report([0, 0, 0])), '"$0.00","—"');
   assert.strictEqual(csv(report([])).split("\n").length, 1);
+});
+
+it("names unpriced models by unpriced records, and nothing when all usage was priced", () => {
+  assert.isUndefined(unpricedModels(report([0.001, 0.002]).rows));
+
+  const message = unpricedModels([
+    { provider: "pi", model: "unknown", unpricedRecords: 2 },
+    { provider: "codex", model: "codex-auto-review", unpricedRecords: 1_200 },
+    { provider: "codex", model: "codex-auto-review", unpricedRecords: 3 },
+    { provider: "codex", model: "gpt-6.1-sol", unpricedRecords: 0 },
+    { provider: "codex", model: "gpt-5.3-codex-spark", unpricedRecords: 1 },
+  ]);
+
+  assert.strictEqual(
+    message,
+    'Unpriced: codex-auto-review (codex, 1,203 records), unknown (pi, 2 records), gpt-5.3-codex-spark (codex, 1 record). Configure their rates under "prices" to price them.',
+  );
+
+  const many = unpricedModels(
+    Array.from({ length: 7 }, (_, index) => ({
+      provider: "codex" as const,
+      model: `model-${index}`,
+      unpricedRecords: 1,
+    })),
+  );
+
+  assert.match(many ?? "", /model-4 \(codex, 1 record\) and 2 more\./);
 });

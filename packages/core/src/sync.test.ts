@@ -3,12 +3,16 @@ import { assert, it } from "@effect/vitest";
 import { Schema } from "effect";
 
 import { PriceBook, type Coverage } from "./model.ts";
+import { pricerFor } from "./pricing.ts";
 import {
+  RepricePayload,
+  type SyncBucket,
   SyncCoverage,
   SyncPayload,
   payloadVersion,
   providerCoverage,
   replacedProviders,
+  repriceChunks,
   sessionBuckets,
 } from "./sync.ts";
 
@@ -82,7 +86,7 @@ it("requires fully read history before coverage can authorize replacement", () =
 
 it("only builds payloads the server can store", () => {
   const buckets = sessionBuckets(
-    PriceBook.make({ status: "custom", fetchedAt: null, source: "fixture", prices: {} }),
+    pricerFor(PriceBook.make({ status: "custom", fetchedAt: null, source: "fixture", prices: {} })),
   );
 
   for (const model of ["model\0", "model\uFFFD", `model\uFFFD${"😀".repeat(600)}`])
@@ -185,19 +189,75 @@ it("only builds payloads the server can store", () => {
     { ...payload, machine: { ...payload.machine, label: "nul\0" } },
     { ...payload, machine: { ...payload.machine, label: "x".repeat(513) } },
     { ...payload, pricing: { ...payload.pricing, fetchedAt: "yesterday" } },
+    { ...payload, pricing: { ...payload.pricing, basis: "" } },
+    { ...payload, pricing: { ...payload.pricing, basis: "x".repeat(129) } },
+    { ...payload, pricing: { ...payload.pricing, basis: "two words" } },
   ])
     assert.isFalse(valid(invalid));
+
+  assert.isTrue(valid({ ...payload, pricing: { ...payload.pricing, basis: "x".repeat(128) } }));
+});
+
+it("prices each record at its own tier before summing the bucket", () => {
+  const buckets = sessionBuckets(
+    pricerFor(
+      PriceBook.make({
+        status: "custom",
+        fetchedAt: null,
+        source: "fixture",
+        prices: {
+          tiered: {
+            input: 1,
+            output: 10,
+            cacheRead: 0.1,
+            cacheWrite: null,
+            tiers: [{ above: 272_000, input: 2, output: 15, cacheRead: 0.2, cacheWrite: null }],
+          },
+        },
+      }),
+    ),
+  );
+
+  // Contexts of 272,000 and 272,001 tokens: the first stays at the base tier.
+  for (const [id, cacheRead] of [
+    ["short", 271_000],
+    ["long", 271_001],
+  ] as const)
+    buckets.add(
+      {
+        provider: "codex",
+        id,
+        session: "session",
+        timestamp: Date.parse("2026-10-20T10:00:00Z"),
+        model: "tiered",
+        cwd: null,
+        repository: null,
+        tokens: { input: 1_000, cacheRead, cacheWrite: 0, output: 100 },
+      },
+      "project",
+    );
+
+  const [bucket, ...rest] = buckets.finish();
+  assert.lengthOf(rest, 0);
+  assert.strictEqual(bucket?.records, 2);
+  assert.strictEqual(bucket?.tokens.cacheRead, 542_001);
+
+  const short = (1_000 * 1 + 271_000 * 0.1 + 100 * 10) / 1_000_000;
+  const long = (1_000 * 2 + 271_001 * 0.2 + 100 * 15) / 1_000_000;
+  assert.closeTo(bucket?.estimatedCostUsd ?? -1, short + long, 1e-12);
 });
 
 it("uploads the priced subtotal of a bucket that also has unpriced records", () => {
   const buckets = sessionBuckets(
-    PriceBook.make({
-      status: "custom",
-      fetchedAt: null,
-      source: "fixture",
-      // Like OpenAI rates upstream: no cache-write price.
-      prices: { priced: { input: 1, output: 0, cacheRead: 0.1, cacheWrite: null } },
-    }),
+    pricerFor(
+      PriceBook.make({
+        status: "custom",
+        fetchedAt: null,
+        source: "fixture",
+        // Like OpenAI rates upstream: no cache-write price.
+        prices: { priced: { input: 1, output: 0, cacheRead: 0.1, cacheWrite: null } },
+      }),
+    ),
   );
 
   const record = (id: string, model: string, cacheWrite: number) =>
@@ -258,4 +318,94 @@ it("uploads the priced subtotal of a bucket that also has unpriced records", () 
   assert.isFalse(valid({ ...payload, version: 2 }));
   assert.isTrue(valid({ ...payload, version: 1, buckets: finished.slice(1) }));
   assert.strictEqual(payloadVersion(finished.slice(1)), 1);
+});
+
+it("splits reprice-only uploads into requests the server accepts", () => {
+  const fields = {
+    hourStart: "2026-10-03T14:00:00.000Z",
+    provider: "copilot",
+    tokens: { input: 10, cacheRead: 0, cacheWrite: 0, output: 1 },
+    records: 1,
+    estimatedCostUsd: 0.001,
+    unpricedRecords: 0,
+  } as const;
+
+  const bucket = (
+    index: number,
+    project = "github.com/example/app",
+    model = "test-model",
+  ): SyncBucket => ({
+    ...fields,
+    sessionKey: index.toString(16).padStart(32, "0"),
+    project,
+    model,
+  });
+
+  const valid = Schema.is(RepricePayload);
+
+  const payload = (buckets: readonly unknown[]) => ({
+    version: 1,
+    clientVersion: "0.0.0-test",
+    pricing: {
+      status: "fresh",
+      fetchedAt: "2026-10-24T10:00:00.000Z",
+      source: "fixture",
+      basis: "token-ledger-pricing@1;copilot-rates@2026-10-24;litellm@tiers",
+    },
+    buckets,
+  });
+
+  const buckets = Array.from({ length: 20_001 }, (_, index) => bucket(index));
+  const chunks = repriceChunks(buckets);
+
+  assert.deepStrictEqual(
+    chunks.map((chunk) => chunk.length),
+    [20_000, 1],
+  );
+  assert.deepStrictEqual(chunks.flat(), buckets);
+  assert.isTrue(chunks.every((chunk) => valid(payload(chunk))));
+  assert.isFalse(valid(payload(buckets)));
+  assert.deepStrictEqual(repriceChunks([]), []);
+
+  // The longest names stay inside the server's 16 MiB body limit.
+  const long = Array.from({ length: 20_000 }, (_, index) =>
+    bucket(index, "😀".repeat(512), "😀".repeat(512)),
+  );
+
+  const split = repriceChunks(long);
+
+  assert.isAbove(split.length, 1);
+  assert.deepStrictEqual(split.flat(), long);
+
+  for (const chunk of split)
+    assert.isBelow(Buffer.byteLength(JSON.stringify(payload(chunk))), 16 * 1024 * 1024);
+
+  const first = bucket(0);
+  const pricing = payload([first]).pricing;
+
+  const unhourly = {
+    ...fields,
+    sessionKey: "0".repeat(32),
+    project: "p",
+    model: "m",
+    hourStart: "2026-10-03T14:30:00.000Z",
+  };
+
+  const unpriced = {
+    ...fields,
+    sessionKey: "0".repeat(32),
+    project: "p",
+    model: "m",
+    estimatedCostUsd: null,
+  };
+
+  for (const invalid of [
+    payload([first, first]),
+    { ...payload([first]), version: 2 },
+    { ...payload([first]), pricing: { ...pricing, basis: undefined } },
+    { ...payload([first]), pricing: { ...pricing, basis: "" } },
+    payload([unpriced]),
+    payload([unhourly]),
+  ])
+    assert.isFalse(valid(invalid));
 });

@@ -1,0 +1,385 @@
+{
+  "version": "2026-10-24",
+  "description": "GitHub Copilot's AI credit rates in USD per million tokens (1 credit = $0.01). effectiveFrom is the UTC day a rate took effect: the day GitHub's usage report starts billing it where that is known, otherwise the day of the GitHub docs change that listed it; 2026-08-21 is the oldest version read, and a model's first entry also prices its earlier usage. long applies to the whole request when input + cacheRead + cacheWrite exceeds its above. uncachedInput cacheWrite bills all but three uncached input tokens at the cache-write rate when a record reports no cache writes. confirmed entries match GitHub's bills or usage report; provisional ones have not been matched yet.",
+  "entries": [
+    {
+      "model": "gpt-6.1-sol",
+      "effectiveFrom": "2026-09-29",
+      "status": "confirmed",
+      "source": "https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing",
+      "uncachedInput": "cacheWrite",
+      "base": {
+        "input": 2,
+        "cacheRead": 0.1,
+        "cacheWrite": 2.5,
+        "output": 10
+      },
+      "long": {
+        "above": 272000,
+        "input": 4,
+        "cacheRead": 0.2,
+        "cacheWrite": 5,
+        "output": 15
+      },
+      "note": "Matched GitHub's daily bills exactly for OpenCode and the Copilot CLI."
+    },
+    {
+      "model": "gpt-6-sol",
+      "effectiveFrom": "2026-09-22",
+      "status": "confirmed",
+      "source": "https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing",
+      "uncachedInput": "cacheWrite",
+      "base": {
+        "input": 2,
+        "cacheRead": 0.2,
+        "cacheWrite": 2.5,
+        "output": 10
+      },
+      "long": {
+        "above": 272000,
+        "input": 4,
+        "cacheRead": 0.4,
+        "cacheWrite": 5,
+        "output": 15
+      }
+    },
+    {
+      "model": "gpt-6-astra",
+      "effectiveFrom": "2026-09-04",
+      "status": "provisional",
+      "source": "https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing",
+      "uncachedInput": "cacheWrite",
+      "base": {
+        "input": 10,
+        "cacheRead": 1,
+        "cacheWrite": 12.5,
+        "output": 50
+      },
+      "long": {
+        "above": 272000,
+        "input": 20,
+        "cacheRead": 2,
+        "cacheWrite": 25,
+        "output": 75
+      }
+    },
+    {
+      "model": "gpt-6-luna",
+      "effectiveFrom": "2026-09-22",
+      "status": "confirmed",
+      "source": "https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing",
+      "uncachedInput": "cacheWrite",
+      "base": {
+        "input": 0.1,
+        "cacheRead": 0.01,
+        "cacheWrite": 0.125,
+        "output": 0.5
+      },
+      "long": {
+        "above": 272000,
+        "input": 0.2,
+        "cacheRead": 0.02,
+        "cacheWrite": 0.25,
+        "output": 0.75
+      }
+    },
+    {
+      "model": "gpt-5.6-sol",
+      "effectiveFrom": "2026-08-21",
+      "status": "provisional",
+      "source": "https://github.com/github/docs/blob/1cabce7332/data/tables/copilot/models-and-pricing.yml",
+      "uncachedInput": "cacheWrite",
+      "base": {
+        "input": 2,
+        "cacheRead": 0.2,
+        "cacheWrite": 2.5,
+        "output": 10
+      },
+      "long": {
+        "above": 272000,
+        "input": 4,
+        "cacheRead": 0.4,
+        "cacheWrite": 5,
+        "output": 15
+      },
+      "note": "Launch promotion at 50% off, through 2026-09-03."
+    },
+    {
+      "model": "gpt-5.6-sol",
+      "effectiveFrom": "2026-09-04",
+      "status": "provisional",
+      "source": "https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing",
+      "uncachedInput": "cacheWrite",
+      "base": {
+        "input": 4,
+        "cacheRead": 0.4,
+        "cacheWrite": 5,
+        "output": 20
+      },
+      "long": {
+        "above": 272000,
+        "input": 8,
+        "cacheRead": 0.8,
+        "cacheWrite": 10,
+        "output": 30
+      }
+    },
+    {
+      "model": "gpt-5.6-terra",
+      "effectiveFrom": "2026-08-21",
+      "status": "provisional",
+      "source": "https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing",
+      "uncachedInput": "cacheWrite",
+      "base": {
+        "input": 2,
+        "cacheRead": 0.2,
+        "cacheWrite": 2.5,
+        "output": 12
+      },
+      "long": {
+        "above": 272000,
+        "input": 4,
+        "cacheRead": 0.4,
+        "cacheWrite": 5,
+        "output": 18
+      }
+    },
+    {
+      "model": "gpt-5.6-luna",
+      "effectiveFrom": "2026-08-21",
+      "status": "provisional",
+      "source": "https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing",
+      "uncachedInput": "cacheWrite",
+      "base": {
+        "input": 0.2,
+        "cacheRead": 0.02,
+        "cacheWrite": 0.25,
+        "output": 1.2
+      },
+      "long": {
+        "above": 200000,
+        "input": 0.4,
+        "cacheRead": 0.04,
+        "cacheWrite": 0.5,
+        "output": 1.8
+      },
+      "note": "Copilot's long-context threshold is 200K, OpenAI's 272K."
+    },
+    {
+      "model": "gpt-5.5",
+      "effectiveFrom": "2026-08-21",
+      "status": "confirmed",
+      "source": "https://github.com/github/docs/blob/9245795993/data/tables/copilot/models-and-pricing.yml",
+      "uncachedInput": "input",
+      "base": {
+        "input": 5,
+        "cacheRead": 0.5,
+        "cacheWrite": null,
+        "output": 30
+      },
+      "long": {
+        "above": 272000,
+        "input": 10,
+        "cacheRead": 1,
+        "cacheWrite": null,
+        "output": 45
+      },
+      "note": "Retired on 2026-10-19."
+    },
+    {
+      "model": "gpt-5.4",
+      "effectiveFrom": "2026-08-21",
+      "status": "confirmed",
+      "source": "https://github.com/github/docs/blob/9245795993/data/tables/copilot/models-and-pricing.yml",
+      "uncachedInput": "input",
+      "base": {
+        "input": 2.5,
+        "cacheRead": 0.25,
+        "cacheWrite": null,
+        "output": 15
+      },
+      "long": {
+        "above": 272000,
+        "input": 5,
+        "cacheRead": 0.5,
+        "cacheWrite": null,
+        "output": 22.5
+      },
+      "note": "Retired on 2026-10-19."
+    },
+    {
+      "model": "gpt-5.3-codex",
+      "effectiveFrom": "2026-08-21",
+      "status": "confirmed",
+      "source": "https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing",
+      "uncachedInput": "input",
+      "base": {
+        "input": 1.75,
+        "cacheRead": 0.175,
+        "cacheWrite": null,
+        "output": 14
+      },
+      "note": "No cache-write rate; matched GitHub's daily bills exactly at the input rate."
+    },
+    {
+      "model": "gpt-5.2",
+      "effectiveFrom": "2026-08-21",
+      "status": "confirmed",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "uncachedInput": "input",
+      "base": {
+        "input": 1.75,
+        "cacheRead": 0.175,
+        "cacheWrite": null,
+        "output": 14
+      },
+      "note": "Not in GitHub's price table; its usage report bills OpenAI's list rate exactly."
+    },
+    {
+      "model": "gpt-5.4-mini",
+      "effectiveFrom": "2026-08-21",
+      "status": "confirmed",
+      "source": "https://github.com/github/docs/blob/9245795993/data/tables/copilot/models-and-pricing.yml",
+      "uncachedInput": "input",
+      "base": {
+        "input": 0.75,
+        "cacheRead": 0.075,
+        "cacheWrite": null,
+        "output": 4.5
+      },
+      "note": "Retired on 2026-10-19."
+    },
+    {
+      "model": "claude-opus-5.5",
+      "effectiveFrom": "2026-09-22",
+      "status": "provisional",
+      "source": "https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing",
+      "uncachedInput": "cacheWrite",
+      "base": {
+        "input": 4,
+        "cacheRead": 0.2,
+        "cacheWrite": 5,
+        "output": 20
+      }
+    },
+    {
+      "model": "claude-opus-5",
+      "effectiveFrom": "2026-08-21",
+      "status": "provisional",
+      "source": "https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing",
+      "uncachedInput": "cacheWrite",
+      "base": {
+        "input": 5,
+        "cacheRead": 0.5,
+        "cacheWrite": 6.25,
+        "output": 25
+      }
+    },
+    {
+      "model": "claude-opus-4.8",
+      "effectiveFrom": "2026-08-21",
+      "status": "provisional",
+      "source": "https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing",
+      "uncachedInput": "cacheWrite",
+      "base": {
+        "input": 5,
+        "cacheRead": 0.5,
+        "cacheWrite": 6.25,
+        "output": 25
+      }
+    },
+    {
+      "model": "claude-sonnet-5.5",
+      "effectiveFrom": "2026-09-28",
+      "status": "confirmed",
+      "source": "https://github.com/github/docs/blob/9fdc6fbf59/data/tables/copilot/models-and-pricing.yml",
+      "uncachedInput": "cacheWrite",
+      "base": {
+        "input": 2,
+        "cacheRead": 0.2,
+        "cacheWrite": 2.5,
+        "output": 10
+      },
+      "note": "GitHub's usage report bills this $0.20 cached rate through 2026-10-07, and bills uncached input as cache writes when a client reports none."
+    },
+    {
+      "model": "claude-sonnet-5.5",
+      "effectiveFrom": "2026-10-08",
+      "status": "confirmed",
+      "source": "https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing",
+      "uncachedInput": "cacheWrite",
+      "base": {
+        "input": 2,
+        "cacheRead": 0.1,
+        "cacheWrite": 2.5,
+        "output": 10
+      },
+      "note": "GitHub's docs listed the $0.10 cached rate on 2026-10-07, but its usage report bills that day at $0.20 and this rate from 2026-10-08."
+    },
+    {
+      "model": "claude-haiku-5.5",
+      "effectiveFrom": "2026-10-07",
+      "status": "confirmed",
+      "source": "https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing",
+      "uncachedInput": "cacheWrite",
+      "base": {
+        "input": 0.1,
+        "cacheRead": 0.01,
+        "cacheWrite": 0.125,
+        "output": 0.5
+      },
+      "long": {
+        "above": 100000,
+        "input": 0.5,
+        "cacheRead": 0.05,
+        "cacheWrite": 0.625,
+        "output": 2.5
+      }
+    },
+    {
+      "model": "mai-code-1.1-flash",
+      "effectiveFrom": "2026-08-21",
+      "status": "confirmed",
+      "source": "https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing",
+      "uncachedInput": "input",
+      "base": {
+        "input": 0.2,
+        "cacheRead": 0.02,
+        "cacheWrite": null,
+        "output": 1.2
+      }
+    },
+    {
+      "model": "copilot-nes-*",
+      "effectiveFrom": "2026-08-21",
+      "status": "confirmed",
+      "source": "https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing",
+      "free": true,
+      "note": "Code completions and next edit suggestions are not billed in AI credits."
+    },
+    {
+      "model": "nes-*",
+      "effectiveFrom": "2026-08-21",
+      "status": "confirmed",
+      "source": "https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing",
+      "free": true,
+      "note": "Code completions and next edit suggestions are not billed in AI credits."
+    },
+    {
+      "model": "gpt-4o-mini",
+      "effectiveFrom": "2026-08-21",
+      "status": "confirmed",
+      "source": "https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing",
+      "free": true,
+      "note": "The name VS Code requests its helper model by, which Copilot records when no response model is exported."
+    },
+    {
+      "model": "gpt-4o-mini-*",
+      "effectiveFrom": "2026-08-21",
+      "status": "confirmed",
+      "source": "https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing",
+      "free": true,
+      "note": "VS Code's helper model: not on the rate card, and GitHub billed none of its recorded October 2026 requests."
+    }
+  ]
+}

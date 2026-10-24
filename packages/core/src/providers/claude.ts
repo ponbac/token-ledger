@@ -1,4 +1,5 @@
 import { Option, Schema } from "effect";
+import type { UsageRecord } from "../model.ts";
 import {
   decodeJson,
   empty,
@@ -22,9 +23,16 @@ const Assistant = Schema.Struct({
       output_tokens: Schema.Natural,
       cache_read_input_tokens: Schema.optionalKey(Schema.Natural),
       cache_creation_input_tokens: Schema.optionalKey(Schema.Natural),
+      // Decoded apart, so that a change in this breakdown can never lose token counts.
+      cache_creation: Schema.optionalKey(Schema.Unknown),
     }),
   }),
 });
+
+// How cache writes split by lifetime. Claude Code writes one-hour caches, which cost more.
+const decodeCacheCreation = Schema.decodeUnknownOption(
+  Schema.Struct({ ephemeral_1h_input_tokens: Schema.optionalKey(Schema.Natural) }),
+);
 
 /** Claude usage repeats per content block; stable message/request IDs prevent double counting. */
 export function claudeParser(file: string): TranscriptParser {
@@ -47,25 +55,32 @@ export function claudeParser(file: string): TranscriptParser {
           ? `${file}:${lineNumber}`
           : `${event.message.id ?? ""}:${event.requestId ?? ""}`;
 
+      const cacheWrite = usage.cache_creation_input_tokens ?? 0;
+
+      const oneHour = Math.min(
+        Option.getOrNull(decodeCacheCreation(usage.cache_creation))?.ephemeral_1h_input_tokens ?? 0,
+        cacheWrite,
+      );
+
+      const record: UsageRecord = {
+        provider: "claude",
+        id,
+        session,
+        timestamp: ms,
+        model: event.message.model,
+        cwd: event.cwd ?? null,
+        repository: null,
+        tokens: {
+          input: usage.input_tokens,
+          output: usage.output_tokens,
+          cacheRead: usage.cache_read_input_tokens ?? 0,
+          cacheWrite,
+        },
+      };
+
       return {
         ...empty,
-        records: [
-          {
-            provider: "claude",
-            id,
-            session,
-            timestamp: ms,
-            model: event.message.model,
-            cwd: event.cwd ?? null,
-            repository: null,
-            tokens: {
-              input: usage.input_tokens,
-              output: usage.output_tokens,
-              cacheRead: usage.cache_read_input_tokens ?? 0,
-              cacheWrite: usage.cache_creation_input_tokens ?? 0,
-            },
-          },
-        ],
+        records: [oneHour > 0 ? { ...record, cacheWrite1h: oneHour } : record],
         warnings:
           event.message.id === undefined && event.requestId === undefined
             ? ["Some Claude records lack stable IDs; copied histories may overlap."]

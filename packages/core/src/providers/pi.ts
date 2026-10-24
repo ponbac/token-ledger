@@ -59,6 +59,10 @@ const unattributedModel = "unknown";
 // not record which plan. Other routes prove nothing: `anthropic`, for one, also takes API keys.
 const chatGptSignIn = "openai-codex";
 
+// Pi's GitHub Copilot route, `github-copilot` in Pi's own provider list, takes only a Copilot
+// sign-in, so its requests are paid for with Copilot's credits.
+const copilotSignIn = "github-copilot";
+
 /**
  * Reads Pi session trees: assistant messages and `usage` entries name their model, while nested
  * tool work and compaction or branch summaries do not, as in Pi's own totals. Every branch of a
@@ -122,7 +126,7 @@ export function piParser(file: string): TranscriptParser {
       if (stamp === null || names === null || count === null || ms === null) return skipped;
       const model = attributed ? (names.responseModel ?? names.model) : undefined;
 
-      const record: UsageRecord = {
+      const own: UsageRecord = {
         provider: "pi",
         id: stamp.id === undefined ? `${file}:${lineNumber}` : `${stamp.id}:${stamp.timestamp}`,
         session,
@@ -132,6 +136,15 @@ export function piParser(file: string): TranscriptParser {
         repository: null,
         tokens: count,
       };
+
+      // An aborted request used nothing, whatever its route. A tool result can sum the
+      // requests of nested work, so its context chooses no long-context tier.
+      const record: UsageRecord =
+        attributed && names.provider === copilotSignIn && totalTokens(count) > 0
+          ? { ...own, billingProvider: "copilot" }
+          : type === "message" && carrier.role === "toolResult"
+            ? { ...own, aggregate: true }
+            : own;
 
       const copied = forked !== null && ms < forked;
 
