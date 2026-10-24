@@ -482,16 +482,18 @@ export function priceRecord(record: UsageRecord, pricer: Pricer): RecordCost {
   if ((cacheRead > 0 && rates.cacheRead === null) || (cacheWrite > 0 && rates.cacheWrite === null))
     return { usd: null, base };
 
-  const implicitWrite =
-    cacheWrite === 0 && price.uncachedInput === "cacheWrite" ? rates.cacheWrite : null;
+  const implicitWrites = cacheWrite === 0 && price.uncachedInput === "cacheWrite";
+  const atInput = implicitWrites ? Math.min(input, 3) : input;
 
-  const atInput = implicitWrite === null ? input : Math.min(input, 3);
+  // Uncached input billed as writes needs the tier's write rate; without it the cost is unknown.
+  if (input > atInput && rates.cacheWrite === null) return { usd: null, base };
+
   const writeRate = rates.cacheWrite ?? 0;
   const oneHour = Math.min(record.cacheWrite1h ?? 0, cacheWrite);
 
   const usd =
     (atInput * rates.input +
-      (input - atInput) * (implicitWrite ?? 0) +
+      (input - atInput) * writeRate +
       cacheRead * (rates.cacheRead ?? 0) +
       (cacheWrite - oneHour) * writeRate +
       oneHour * (rates.cacheWrite1h ?? writeRate) +

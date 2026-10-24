@@ -138,6 +138,14 @@ describe("vendor rates", () => {
       prices: {
         known: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 3 },
         "no-cache": { input: 2, output: 10, cacheRead: null, cacheWrite: null },
+        "implicit-unknown": {
+          input: 2,
+          output: 10,
+          cacheRead: 0.2,
+          cacheWrite: 2.5,
+          tiers: [{ above: 1_000, input: 4, output: 15, cacheRead: 0.4, cacheWrite: null }],
+          uncachedInput: "cacheWrite",
+        },
       },
     });
 
@@ -149,6 +157,14 @@ describe("vendor rates", () => {
     });
     assert.strictEqual(priceRecord(request("no-cache", used), pricer).usd, null);
     assert.closeTo(priceRecord(request("known", used), pricer).usd ?? -1, 0.000322, 1e-12);
+
+    // Implicit writes need the chosen tier's write rate, unless no input is billed as written.
+    const implicit = (input: number, cacheRead = 0) =>
+      priceRecord(request("implicit-unknown", tokens(input, cacheRead)), pricer).usd;
+
+    assert.closeTo(implicit(500) ?? -1, (3 * 2 + 497 * 2.5) / 1e6, 1e-15);
+    assert.strictEqual(implicit(2_000), null);
+    assert.closeTo(implicit(3, 2_000) ?? -1, (3 * 4 + 2_000 * 0.4) / 1e6, 1e-15);
   });
 
   it.effect("reads a saved rate snapshot offline without needing a provider account", () =>
