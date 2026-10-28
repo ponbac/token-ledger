@@ -56,7 +56,9 @@ export function grokParser(file: string): TranscriptParser {
         const cacheWrite = count.cacheCreationTokens ?? 0;
 
         if (cacheRead + cacheWrite > count.inputTokens) return skipped;
+        // A turn sums its requests per model, so its context chooses no long-context tier.
         records.push({
+          aggregate: true,
           provider: "grok",
           id: `${session}:${promptId ?? `${file}:${lineNumber}`}:${model}`,
           session,

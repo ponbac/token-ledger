@@ -6,9 +6,10 @@ An Effect v4 core reads provider histories and produces structured reports. An E
 CLI handles discovery, configuration, and terminal/CSV/JSON output. You do not need
 T3 Code, provider API keys, or a company dashboard to use it.
 
-**Dollar figures are API-equivalent estimates, not subscription expenses.** Reports
-keep input, cache-read, cache-write, and output tokens separate. Unknown model or
-cache prices stay unknown; the known subtotal remains available.
+**Dollar figures are API-equivalent estimates, not subscription expenses.** Requests
+GitHub Copilot paid for are priced at Copilot's own AI credit rates. Reports keep input,
+cache-read, cache-write, and output tokens separate. Unknown model or cache prices stay
+unknown; the known subtotal remains available.
 
 ## Quick start
 
@@ -128,9 +129,10 @@ keeps the server's stored OpenCode usage. A source directory holding no OpenCode
 all is reported as `missing`, which keeps stored usage too. Working directories
 OpenCode stored on Windows with forward slashes are matched as native paths.
 
-Models are reported under the ID OpenCode recorded, such as `claude-opus-4.5`, and priced
-by the public rate table; GitHub Copilot's dotted Claude IDs are not in it and stay unpriced
-unless configured under `prices`. OpenCode's own recorded costs are not used for estimates.
+Models are reported under the ID OpenCode recorded, such as `claude-opus-4.5`. Requests on
+the `github-copilot` route are priced with [Copilot's rate card](#prices-and-exports), and
+other routes' by the public rate table, which prices a dotted Claude version as Anthropic's
+hyphenated ID. OpenCode's own recorded costs are not used for estimates.
 
 `sync` names the subscription that paid for a request from the route OpenCode recorded:
 `github-copilot` requests bill to Copilot, and `openai` requests with a recorded cost of
@@ -441,29 +443,82 @@ overlapping files: the first configured source owns their project attribution.
 
 ## Prices and exports
 
-The CLI fetches the public LiteLLM model-rate table and caches the decoded snapshot
-for 24 hours under `$XDG_CACHE_HOME/token-ledger` (default `~/.cache/token-ledger`).
-Histories are processed locally. `report` only uses the network for this public
-pricing request; `sync` also uploads aggregated usage, as described below.
-`--offline` uses cached prices and config overrides. A failed refresh falls back to
-cached prices, with the snapshot timestamp retained in JSON.
+The CLI fetches the public LiteLLM model-rate table and caches the decoded snapshot, its
+long-context tiers included, for 24 hours as `prices-v2.json` under
+`$XDG_CACHE_HOME/token-ledger` (default `~/.cache/token-ledger`); earlier versions'
+snapshots lack the tiers and are not reused. Histories are processed locally. `report` only
+uses the network for this public pricing request; `sync` also uploads aggregated usage, as
+described below. `--offline` uses cached prices and config overrides. A failed refresh falls
+back to cached prices, with the snapshot timestamp retained in JSON.
 
-Override exact model IDs in USD per million tokens:
+Each request is priced on its own, before any aggregation:
+
+- **Long context.** A request's context is its uncached input, cache reads, and cache
+  writes together. The whole request is priced at the highest tier whose threshold its
+  context exceeds: against a 272K tier, 272,000 tokens stay at the base rates and 272,001
+  are long. OpenAI's GPT-5.6 and GPT-6.x models cost twice as much above 272K (output 1.5
+  times); Claude Haiku 5.5 has a tier above 100K, and other Claude models none. A Grok turn
+  and Pi's usage for nested tool work can each sum several requests, so their context says
+  nothing about one request: they are priced at the base tier.
+- **GitHub Copilot.** Requests Copilot paid for are priced with GitHub's own rate card,
+  checked in as [`copilot-rates.json`](packages/core/src/copilot-rates.json): Copilot's
+  requests unless a billing hint routes them to a ChatGPT plan, and OpenCode's and Pi's
+  `github-copilot` routes. Its rates are dated because GitHub changes them, as when GPT-5.6
+  Sol's launch discount ended after 2026-09-03, or Claude Sonnet 5.5's cached rate halved
+  from 2026-10-08; a request takes the rate in effect on its UTC day.
+  Next edit suggestions (`copilot-nes-*`, `nes-*`) and VS Code's helper model
+  (`gpt-4o-mini`, `gpt-4o-mini-*`) are free. A model the card lacks takes LiteLLM's
+  `github_copilot/` rates, then the vendor's. Entries marked `provisional` have not yet been
+  matched against GitHub's bills or its AI usage report.
+- **Implicit cache writes.** OpenAI's GPT-5.6 and later models write uncached input to their
+  cache at a cache-write rate of 1.25 times input, but their clients report no cache writes,
+  and GitHub bills Copilot requests the same way. So when a request reports no cache writes
+  and its price has OpenAI's cache-write rate, or Copilot's card applies the rule, three of
+  its uncached input tokens are priced at the input rate and the rest at the cache-write
+  rate, whoever paid. GitHub's bills for GPT-6.1 Sol match this exactly, and its AI usage
+  report bills exactly three input tokens per request. It bills Claude via Copilot the same
+  way when a client reports no cache writes, so every Copilot price with a cache-write rate
+  applies the rule. Claude Code reports its cache writes, so Anthropic's own prices bill
+  uncached input at the input rate.
+- **One-hour cache writes.** Claude Code writes one-hour caches, which cost more than
+  five-minute ones: $8 instead of $5 per million on Opus 5.5. The one-hour share of a
+  request's cache writes is priced at LiteLLM's one-hour rate; token counts do not change.
+- **Model names.** Dotted Claude versions, as Copilot and OpenCode spell them, are priced as
+  Anthropic's hyphenated IDs, and a `[1m]` context variant as its base model. Private
+  aliases are not guessed: Codex's `codex-auto-review` and `gpt-5.3-codex-spark` have no
+  published price and stay unpriced. `report` and `sync` name unpriced models on stderr.
+
+`report` loads no billing hints, so it prices a Copilot request routed to a ChatGPT plan
+with Copilot's rate card, as if Copilot had paid; `sync` reads the hints and prices it as
+an OpenAI request.
+
+Override exact model IDs in USD per million tokens, optionally with long-context `tiers`, a
+one-hour cache-write rate (`cacheWrite1h`), and implicit cache writes (`uncachedInput`,
+`input` by default):
 
 ```json
 {
   "prices": {
-    "my-model": { "input": 2, "output": 10, "cacheRead": 0.2, "cacheWrite": null }
+    "my-model": { "input": 2, "output": 10, "cacheRead": 0.2, "cacheWrite": null },
+    "my-tiered-model": {
+      "input": 2,
+      "output": 10,
+      "cacheRead": 0.1,
+      "cacheWrite": 2.5,
+      "uncachedInput": "cacheWrite",
+      "tiers": [{ "above": 272000, "input": 4, "output": 15, "cacheRead": 0.2, "cacheWrite": 5 }]
+    }
   }
 }
 ```
 
-`null` means unknown, while `0` explicitly means free. Rates are base-tier estimates
-applied to the whole selected history; historical price changes, service tiers,
-tool charges, taxes, negotiated discounts, and subscription allocations are not
-modeled. Provider-reported credit or dollar figures do not override this estimate.
+`null` means unknown, while `0` explicitly means free. Overrides replace vendor rates, not
+the rates Copilot's card gives the requests Copilot paid for. Vendor rates apply to the whole
+selected history: their historical changes, service tiers, tool charges, taxes, negotiated
+discounts, Copilot's discount for automatic model selection, and subscription allocations
+are not modeled. Provider-reported credit or dollar figures do not override this estimate.
 
-JSON is a versioned report (version 2; version 1 used UTC days) with pricing provenance, applied unit rates, coverage diagnostics, and rows
+JSON is a versioned report (version 2; version 1 used UTC days) with pricing provenance, applied base-tier unit rates, coverage diagnostics, and rows
 grouped by project/day/provider/model. Its `timeZone` field names the IANA zone of
 `since`, `until`, and each row's `day`. CSV instead matches the terminal summary:
 one row per project, sorted by known API cost, plus a Total row. It includes token
@@ -710,7 +765,10 @@ you run it:
   cache, and output tokens, request counts, and API-equivalent cost, with the
   subscription that paid when a request's route or a billing hint shows it. Also the
   window, your time zone name, the machine ID and label, the CLI version, per-provider
-  coverage counts, pricing provenance, and billing plans Codex reports.
+  coverage counts, pricing provenance, and billing plans Codex reports. Provenance includes
+  a pricing basis naming the pricing method, the Copilot rate card's version, and a hash of
+  any configured price overrides. [Repricing](#repricing-older-usage) sends the same hourly
+  totals again for older hours, with new costs.
 - **Hashed:** session identities. Some providers use a transcript's file path as its
   session, so no raw session ID is sent.
 - **Never uploaded:** prompts, responses, individual requests, source code, file or
@@ -766,6 +824,39 @@ Exit codes: `0` synced, `1` invalid input or settings, `2` refused by `--strict`
 refused, `5` unsupported payload version (upgrade token-ledger), `6` payload rejected,
 `7` superseded twice by newer syncs from this machine (run it again).
 
+### Repricing older usage
+
+Prices change: a token-ledger release can price requests differently, GitHub changes
+Copilot's rates, and you can change configured `prices`. Each upload names the pricing basis
+behind its costs, and a sync replaces only its own window, so hours before it keep the costs
+an older basis gave them. After each successful sync whose upload names a basis, `sync` asks
+the server which of this machine's stored usage, from the server's reprice floor on, another
+basis priced. For each tool with such usage before the window, it rebuilds that tool's hourly
+buckets from the first stale hour up to the window, exactly as an upload builds them, and
+sends them as a reprice-only upload. The server takes a new cost only for a stored bucket
+that matches exactly: the same hour, session, project, model, payer, token counts, and
+request count. It never adds or removes usage, so history a tool has since pruned, such as
+Claude Code's transcripts after 30 days, keeps its stored cost instead of disappearing.
+
+`sync` prints, per tool, how many stored buckets took the new cost and how many of the
+buckets it sent matched none:
+
+```text
+Repriced copilot from 2026-10-03 14:00 UTC · 12 buckets stored on an older pricing basis · sent 290 · 288 updated · 2 unmatched
+```
+
+Finished reprices are remembered in `repricing.json` in the settings directory, per server
+and tool, with the end of the sync's window. When the server later names the same first hour
+for the same basis, and the new window starts by that end, the stale buckets left are ones
+this machine can no longer reproduce, and `sync` says it skipped them rather than sending
+them on every run; delete the file to send them again. A sync of a later window than that,
+after `--until` sent an earlier part of the history, reprices again. A tool whose history
+`sync` cannot find at all, for example because its directory is not mounted, is reported on
+stdout and not remembered, so a later sync that finds it reprices it. A reprice that does not
+finish, because the server is unreachable or refuses it or some history cannot be read, is
+reported on stderr and tried again on the next sync; it never changes the sync's exit code. A run that priced without vendor rates claims no basis and reprices nothing.
+`--provider` limits repricing to that tool, and `--dry-run` neither asks nor sends.
+
 ## Accuracy and limitations
 
 - Reports reflect saved, readable local history, not an authoritative provider invoice.
@@ -789,7 +880,8 @@ refused, `5` unsupported payload version (upgrade token-ledger), `6` payload rej
   request is counted once, for the session that made it; when that session's file is not
   among the files read, it is counted for the fork. Pi names no model for nested tool
   work or for compaction and branch summaries; those tokens are reported under the model
-  `unknown` and stay unpriced. Pi's own recorded costs are not used.
+  `unknown` and stay unpriced. Pi's own recorded costs are not used. Requests on Pi's
+  `github-copilot` route bill to Copilot.
 - A Pi `sessionDir` setting is not read; when sessions live outside the default
   directory, set `PI_CODING_AGENT_SESSION_DIR` or configure a `pi` source.
 - OpenCode keeps each request's usage on its assistant message. Its newer store repeats
@@ -829,7 +921,7 @@ For manual publication:
 1. Log in with `npm login` using an account with publish access to `@ponbac/token-ledger`.
 2. Run `bun run check`. The CLI test packs the package, installs it offline outside
    the repository with lifecycle scripts disabled, and exercises the installed CLI.
-3. Run `bun run pack` to create `dist/ponbac-token-ledger-0.9.0.tgz` (filename follows version).
+3. Run `bun run pack` to create `dist/ponbac-token-ledger-0.10.0.tgz` (filename follows version).
 4. Inspect `npm publish ./dist/npm --dry-run`.
 5. Publish with `npm publish ./dist/npm --access public`; complete npm's authentication
    prompt if requested.

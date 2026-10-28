@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 import { Match, Schema } from "effect";
 
 import { UsageReport } from "../packages/core/src/model.ts";
-import { SyncMachine, SyncPayload } from "../packages/core/src/sync.ts";
+import { RepricePayload, SyncMachine, SyncPayload } from "../packages/core/src/sync.ts";
 
 const packageDirectory = fileURLToPath(new URL("../dist/npm", import.meta.url));
 
@@ -48,6 +48,8 @@ const decodeReport = Schema.decodeUnknownSync(Schema.fromJsonString(UsageReport)
 const decodePayload = Schema.decodeUnknownSync(Schema.fromJsonString(SyncPayload));
 
 const decodeMachine = Schema.decodeUnknownSync(Schema.fromJsonString(SyncMachine));
+
+const decodeReprice = Schema.decodeUnknownSync(Schema.fromJsonString(RepricePayload));
 
 const decodeAddress = Schema.decodeUnknownSync(Schema.Struct({ port: Schema.Number }));
 
@@ -643,6 +645,231 @@ await test("a machine's first sync uploads all its history, and only while the s
       "2026-09-23T00:00:00.000Z",
       [september],
     ]);
+  } finally {
+    server.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+await test("sync reprices stored usage before its window once per pricing basis, and never fails for it", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "token-ledger-reprice-"));
+  const token = "toki_fixture_secret";
+  /** @type {{ method: string | undefined; url: URL; body: string }[]} */
+  const requests = [];
+  /** Where the server says the machine's stale codex usage starts. */
+  let from = "2026-09-15T08:00:00Z";
+  let discoveryStatus = 200;
+  let repriceStatus = 200;
+
+  const server = createServer((request, response) => {
+    let body = "";
+    request.setEncoding("utf8");
+    request.on("data", (chunk) => {
+      body += chunk;
+    });
+    request.on("end", () => {
+      const url = new URL(request.url ?? "/", "http://127.0.0.1");
+      requests.push({ method: request.method, url, body });
+
+      /** @param {number} status @param {unknown} answer */
+      const reply = (status, answer) => {
+        response.writeHead(status, { "content-type": "application/json" });
+        response.end(JSON.stringify(answer));
+      };
+
+      if (request.method === "PUT") return reply(200, { storedBuckets: 1 });
+
+      if (request.method === "GET")
+        return reply(discoveryStatus, {
+          floor: "2026-09-01T00:00:00Z",
+          providers: [
+            // Not a source of this sync, so it is left alone.
+            { provider: "claude", from: "2026-09-10T00:00:00Z", staleBuckets: 4 },
+            { provider: "codex", from, staleBuckets: 1 },
+          ],
+        });
+
+      return reply(
+        repriceStatus,
+        repriceStatus === 200
+          ? { updated: decodeReprice(body).buckets.length, unmatched: 0, beforeFloor: 0 }
+          : { error: "refused" },
+      );
+    });
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(undefined)));
+
+  try {
+    const history = join(directory, "history.jsonl");
+
+    /** @param {string} timestamp @param {number} input */
+    const usage = (timestamp, input) =>
+      JSON.stringify({
+        type: "event_msg",
+        timestamp,
+        payload: {
+          type: "token_count",
+          info: { last_token_usage: { input_tokens: input, output_tokens: 20 } },
+        },
+      });
+
+    writeFileSync(
+      history,
+      [
+        JSON.stringify({ type: "session_meta", payload: { id: "fixture-session" } }),
+        JSON.stringify({ type: "turn_context", payload: { model: "fixture-model" } }),
+        usage("2026-09-15T08:10:00Z", 100),
+        usage("2026-09-22T12:00:00Z", 150),
+      ].join("\n") + "\n",
+    );
+
+    const configuration = join(directory, "token-ledger.json");
+
+    writeFileSync(
+      configuration,
+      JSON.stringify({ sources: [{ provider: "codex", path: history }] }),
+    );
+
+    // Cached vendor rates establish a pricing basis offline, as fetched ones do.
+    mkdirSync(join(directory, "token-ledger"), { recursive: true });
+    writeFileSync(
+      join(directory, "token-ledger/prices-v2.json"),
+      JSON.stringify({
+        status: "fresh",
+        fetchedAt: "2026-09-22T00:00:00.000Z",
+        source: "fixture-rates",
+        prices: { "fixture-model": { input: 1, output: 2, cacheRead: 0.1, cacheWrite: null } },
+      }),
+    );
+
+    /** @param {string[]} args @returns {Promise<{ status: number | null; stdout: string; stderr: string }>} */
+    const run = (args) =>
+      new Promise((resolve) => {
+        const child = spawn(
+          process.execPath,
+          [
+            join(packageDirectory, "dist/main.js"),
+            "sync",
+            "--config",
+            configuration,
+            "--offline",
+            "--since",
+            "2026-09-22",
+            "--until",
+            "2026-09-22",
+            "--time-zone",
+            "UTC",
+            ...args,
+          ],
+          {
+            cwd: directory,
+            env: {
+              ...process.env,
+              HOME: directory,
+              XDG_CACHE_HOME: directory,
+              XDG_CONFIG_HOME: join(directory, "config"),
+              TOKEN_LEDGER_SERVER: `http://127.0.0.1:${decodeAddress(server.address()).port}`,
+              TOKI_API_TOKEN: token,
+            },
+          },
+        );
+
+        let stdout = "";
+        let stderr = "";
+        child.stdout.setEncoding("utf8").on("data", (chunk) => {
+          stdout += chunk;
+        });
+        child.stderr.setEncoding("utf8").on("data", (chunk) => {
+          stderr += chunk;
+        });
+        child.on("close", (code) => resolve({ status: code, stdout, stderr }));
+      });
+
+    /** @param {number} start */
+    const methods = (start) => requests.slice(start).map((request) => request.method);
+
+    const first = await run([]);
+
+    assert.equal(first.status, 0, first.stderr);
+    assert.deepEqual(methods(0), ["PUT", "GET", "POST"]);
+
+    const machine = decodeMachine(
+      readFileSync(join(directory, "config/token-ledger/machine.json"), "utf8"),
+    );
+
+    const uploaded = decodePayload(requests[0]?.body ?? "");
+    const basis = uploaded.pricing.basis;
+
+    assert.match(basis ?? "", /^token-ledger-pricing@\d+;copilot-rates@[\d-]+;litellm@tiers$/);
+    assert.equal(requests[1]?.url.pathname, `/ai-usage/machines/${machine.id}/repricing`);
+    assert.equal(requests[1]?.url.searchParams.get("basis"), basis);
+    assert.equal(requests[2]?.url.pathname, `/ai-usage/machines/${machine.id}/repricing`);
+
+    const repriced = decodeReprice(requests[2]?.body ?? "");
+
+    assert.equal(repriced.pricing.basis, basis);
+    // The hour before the window, built as the upload that stored it built it.
+    assert.deepEqual(
+      repriced.buckets.map((bucket) => [bucket.hourStart, bucket.provider, bucket.records]),
+      [["2026-09-15T08:00:00.000Z", "codex", 1]],
+    );
+    assert.equal(repriced.buckets[0]?.sessionKey, uploaded.buckets[0]?.sessionKey);
+    assert.match(first.stdout, /Synced/);
+    assert.match(
+      first.stdout,
+      /Repriced codex from 2026-09-15 08:00 UTC · 1 bucket stored on an older pricing basis · sent 1 · 1 updated · 0 unmatched/,
+    );
+    assert.ok(existsSync(join(directory, "config/token-ledger/repricing.json")));
+
+    // The same hour on the same basis: what is left cannot be reproduced here.
+    const second = await run([]);
+
+    assert.equal(second.status, 0, second.stderr);
+    assert.deepEqual(methods(3), ["PUT", "GET"]);
+    assert.match(second.stdout, /Repricing codex skipped/);
+
+    // A dry run uploads nothing and reprices nothing.
+    const dryRun = await run(["--dry-run"]);
+
+    assert.equal(dryRun.status, 0, dryRun.stderr);
+    assert.equal(requests.length, 5);
+
+    // A refused reprice is reported; the sync still succeeds, and the next one tries again.
+    from = "2026-09-14T00:00:00Z";
+    repriceStatus = 400;
+    const refused = await run([]);
+
+    assert.equal(refused.status, 0, refused.stderr);
+    assert.deepEqual(methods(5), ["PUT", "GET", "POST"]);
+    assert.match(refused.stdout, /Synced/);
+    assert.match(
+      refused.stderr,
+      /Repricing codex from 2026-09-14 00:00 UTC did not finish: The server refused the request \(400\)\. The next sync tries again\./,
+    );
+
+    repriceStatus = 200;
+    const retried = await run([]);
+
+    assert.equal(retried.status, 0, retried.stderr);
+    assert.deepEqual(methods(8), ["PUT", "GET", "POST"]);
+    assert.match(retried.stdout, /Repriced codex from 2026-09-14 00:00 UTC/);
+
+    // A server without repricing does not fail the sync either.
+    discoveryStatus = 404;
+    const older = await run([]);
+
+    assert.equal(older.status, 0, older.stderr);
+    assert.deepEqual(methods(11), ["PUT", "GET"]);
+    assert.match(
+      older.stderr,
+      /Could not ask the server what to reprice: The server does not offer repricing/,
+    );
+
+    for (const output of [first, second, dryRun, refused, retried, older]) {
+      assert.doesNotMatch(output.stdout + output.stderr, new RegExp(token));
+      assert.doesNotMatch(output.stdout + output.stderr, new RegExp(directory));
+    }
   } finally {
     server.close();
     rmSync(directory, { recursive: true, force: true });

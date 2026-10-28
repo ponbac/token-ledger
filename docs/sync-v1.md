@@ -1,8 +1,9 @@
 # Sync payload, versions 1, 2, and 3
 
-The contract between `token-ledger sync` and the toki2 ingest endpoint. The Effect
-Schema `SyncPayload` in [`packages/core/src/sync.ts`](../packages/core/src/sync.ts) is
-authoritative; this page explains it. Figures are API-equivalent estimates, not bills.
+The contract between `token-ledger sync` and the toki2 ingest endpoint, and its
+[repricing](#repricing) endpoints. The Effect Schemas `SyncPayload` and `RepricePayload` in
+[`packages/core/src/sync.ts`](../packages/core/src/sync.ts) are authoritative; this page
+explains them. Figures are API-equivalent estimates, not bills.
 
 Version 2 adds an optional `billingProvider` to each bucket. It names a different
 subscription provider (`codex`, `claude`, `grok`, or `copilot`); Pi and OpenCode cannot
@@ -36,6 +37,22 @@ applied `snapshotAt` per machine and refuses an older one with `409`, so a slow 
 cannot overwrite a newer one from the same machine. It is optional: servers without
 this guard ignore it, and a payload without it is not ordered.
 
+Any version may carry `pricing.basis`, 1 to 128 printable ASCII characters naming what
+priced every `estimatedCostUsd` in the payload: the client's pricing method, the version of
+its checked-in GitHub Copilot rate card, and a hash of any configured price overrides, such
+as `token-ledger-pricing@1;copilot-rates@2026-10-24;litellm@tiers`. It does not change with
+the time or contents of a LiteLLM fetch. The client omits it when it priced without vendor
+rates, LiteLLM being unavailable, so such an upload never claims the basis of a complete
+one; an absent or `null` basis means a legacy client. The server treats it as opaque,
+compares it for equality, and stores it on every bucket the upload writes, so it can tell
+which stored hours were priced on an older basis, which the client then
+[reprices](#repricing). Servers that do not store it ignore it.
+
+Costs are API-equivalent, except that requests GitHub Copilot paid for (`provider`
+`copilot` without `billingProvider`, or `billingProvider` `copilot`) are priced at
+Copilot's own AI credit rates. Each request is priced before it is summed into a bucket, so
+its own context chooses its long-context tier.
+
 ## Request
 
 ```http
@@ -62,7 +79,8 @@ A synthetic example:
   "pricing": {
     "status": "fresh",
     "fetchedAt": "2026-09-22T07:00:00.000Z",
-    "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
+    "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json; GitHub Copilot rates 2026-10-24",
+    "basis": "token-ledger-pricing@1;copilot-rates@2026-10-24;litellm@tiers"
   },
   "buckets": [
     {
@@ -101,7 +119,7 @@ A synthetic example:
 | `clientVersion`    | token-ledger version, for diagnostics.                                                                                                      |
 | `timeZone`         | The client's IANA zone, for display and debugging only. Every instant is UTC.                                                               |
 | `window`           | Half-open `[start, end)` on whole UTC hours: the client's local days, widened outward to whole hours.                                       |
-| `pricing`          | Provenance of the rates behind every `estimatedCostUsd`.                                                                                    |
+| `pricing`          | Provenance of the rates behind every `estimatedCostUsd`: `status`, `fetchedAt`, a readable `source`, and an optional `basis` (above).       |
 | `buckets[]`        | Usage keyed by `(hourStart, sessionKey, project, provider, model, billingProvider)`; each key occurs at most once. Only replaced providers. |
 | `hourStart`        | Start of a whole UTC hour inside `window`.                                                                                                  |
 | `sessionKey`       | 32 hex characters: a truncated SHA-256 of provider and session. Opaque; stable across syncs from one machine.                               |
@@ -177,7 +195,7 @@ always opened.
    the payload's buckets for it. Other providers' stored buckets are untouched.
    Uploading the same payload twice leaves the same state.
 4. Record the machine's label, client version, time zone, coverage, pricing, and
-   last sync time.
+   last sync time, and store `pricing.basis`, or none, on every bucket inserted.
 5. Sum buckets across machines. Keep unknown costs visible: an aggregate with any
    `null` cost is a known subtotal plus unpriced usage, not a total. The known
    subtotal sums every non-null bucket cost. A version 1 or 2 bucket mixing priced and
@@ -220,9 +238,121 @@ Because each sync replaces its window for every replaced provider, a later windo
 local retention: Claude Code, for example, deletes transcripts after 30 days by
 default. Re-syncing a pruned window would replace good server data with less.
 
+## Repricing
+
+A sync replaces only its window, so hours stored before it keep the costs an older pricing
+basis gave them when the client's pricing changes: its pricing method, its GitHub Copilot
+rate card, or configured overrides. Two endpoints, with the upload's bearer token, give those
+hours new costs without replacing any usage.
+
+### Discovery
+
+```http
+GET /ai-usage/machines/{machineId}/repricing?basis=<pricing basis>
+Authorization: Bearer toki_…
+```
+
+```json
+{
+  "floor": "2026-10-01T00:00:00Z",
+  "providers": [
+    { "provider": "claude", "from": null, "staleBuckets": 0 },
+    { "provider": "copilot", "from": "2026-10-03T14:00:00Z", "staleBuckets": 12 }
+  ]
+}
+```
+
+`floor` is the earliest hour the server reprices. `providers` has one entry per provider with
+stored buckets for the caller's machine, ordered by provider: `from` is the earliest stored
+`hourStart` at or after `floor` whose bucket's basis differs from `basis` (a bucket stored
+without one differs), or `null` when none does, and `staleBuckets` counts those buckets. A
+machine the server does not know, or another user's, has no providers. A missing or empty
+`basis`, or one longer than 128 characters, is `400`. Instants are RFC 3339 UTC; the client
+accepts them with or without fractional seconds, and ignores providers it does not know.
+
+### Reprice-only upload
+
+```http
+POST /ai-usage/machines/{machineId}/repricing
+Authorization: Bearer toki_…
+Content-Type: application/json
+```
+
+```json
+{
+  "version": 1,
+  "clientVersion": "0.9.0",
+  "pricing": {
+    "status": "fresh",
+    "fetchedAt": "2026-10-24T10:00:00.000Z",
+    "source": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json; GitHub Copilot rates 2026-10-24",
+    "basis": "token-ledger-pricing@1;copilot-rates@2026-10-24;litellm@tiers"
+  },
+  "buckets": [
+    {
+      "hourStart": "2026-10-03T14:00:00.000Z",
+      "sessionKey": "9b1f0c6e2d4a8b7c3e5f1a2b4c6d8e0f",
+      "project": "github.com/example/app",
+      "provider": "copilot",
+      "model": "example-model",
+      "tokens": { "input": 1200, "cacheRead": 48000, "cacheWrite": 0, "output": 900 },
+      "records": 14,
+      "estimatedCostUsd": 0.0421,
+      "unpricedRecords": 0
+    }
+  ]
+}
+```
+
+Each bucket is exactly an upload bucket and passes the same validation, with version 3
+costs: `estimatedCostUsd` is `null` only when every record is unpriced, and otherwise the
+priced subtotal. `pricing.basis` is required. Bucket keys are unique, and a request holds at
+most 20,000 buckets; the body limit is the upload's 16 MiB. Any other `version` is `400`.
+
+In one transaction, for each bucket whose `hourStart` is at or after the floor, the server
+updates the cost, unpriced record count, and pricing basis of the stored bucket of the same
+user and machine with the same key (`billingProvider` compared null-safely), the same four
+token counts, and the same record count, after the upload's own normalisation, which stores
+Copilot's next edit suggestions at zero cost. It never inserts or deletes a bucket, and does
+not touch coverage, plan hints, the snapshot, or sync times. It answers
+`200 { "updated": n, "unmatched": n, "beforeFloor": n }`: `updated` counts matched buckets,
+also those whose values were equal already; `unmatched` the buckets from the floor on that
+matched none; `beforeFloor` those before it. Errors are as for the upload: `400` for an
+invalid body, a repeated key, or more than 20,000 buckets, `401`, `413`, `415`, and `5xx`
+for failures a retry can fix.
+
+Pruned history cannot wipe stored usage: a bucket the machine no longer has is simply not
+sent, and keeps its old basis. A request without the billing hints it once had does not match
+either, because the payer is part of the key.
+
+### Client behaviour
+
+After a sync stores its window, and only when its upload carried a `pricing.basis`, the
+client asks discovery with that basis. For each provider the sync covered, after
+`--provider`, whose `from` (never earlier than `floor`) is before the window's start, it
+builds that provider's buckets for `[from, window start)` as an upload builds them: the same
+sources, project mappings, billing hints, prices, and keys. Every file that could hold usage
+from `from` on is opened: the 36-hour modification-time rule counts from `from`, not from the
+window. A provider whose history could not all be read (`failed`) or was not found at all
+(`missing`) waits for a later sync; nothing is sent for it.
+
+The buckets go in requests of at most 20,000 buckets and 12 MiB of bucket JSON, one provider
+at a time. Unreachable servers, timeouts, `408`, `429`, and `5xx` are retried three times
+with backoff, each time with the identical request, so a retry never widens to other
+providers; refusals are final for the run. A finished reprice is remembered in
+`repricing.json` in the client's settings directory, per server origin and provider, with
+its basis, `from`, and the end of the sync's window. When discovery later names the same
+`from` for the same basis, and the new window starts no later than that end, the provider is
+skipped: everything from `from` up to the window was sent on this basis, so the stale buckets
+left are ones the machine can no longer reproduce. A provider that waits is not remembered.
+`sync` prints each provider's `updated` and `unmatched` counts, or that it was skipped or did
+not finish, without tokens, paths, or history contents. A reprice that does not finish never
+changes the sync's exit code; the next sync tries again. `sync --dry-run` neither asks nor
+sends.
+
 ## Privacy
 
-Payloads contain no prompts, responses, individual requests, credentials, source
-paths, or raw session IDs. Some providers fall back to a transcript path as the
+Payloads, reprice-only uploads included, contain no prompts, responses, individual requests,
+credentials, source paths, or raw session IDs. Some providers fall back to a transcript path as the
 session identity, so session identities are always hashed. `coverage` omits source
 paths and diagnostic messages.

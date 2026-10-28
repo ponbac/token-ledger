@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { homedir, hostname } from "node:os";
 
+import { PricingBasis, Provider } from "@token-ledger/core/model";
 import { SyncMachine } from "@token-ledger/core/sync";
 import { Config, Effect, FileSystem, Match, Option, Path, type Redacted, Schema } from "effect";
 
@@ -157,4 +158,78 @@ export const saveSyncSettings = Effect.fn("Settings.saveSync")(function* (
   );
 
   return file;
+});
+
+/**
+ * A reprice this installation finished: it sent `server`, an origin, every bucket of
+ * `provider` it could build from `from` up to its sync's window, priced on `basis`, and that
+ * sync uploaded the window, which ends at `coveredUntil`. `from` is the hour the server named,
+ * so the same answer on the same basis later, for a window starting by `coveredUntil`, means
+ * only buckets this machine cannot reproduce are left.
+ */
+export const CompletedReprice = Schema.Struct({
+  server: Schema.String,
+  provider: Provider,
+  basis: PricingBasis,
+  from: Schema.DateTimeUtcFromString,
+  coveredUntil: Schema.DateTimeUtcFromString,
+});
+
+/** One finished reprice per server and provider. */
+export interface CompletedReprice extends Schema.Schema.Type<typeof CompletedReprice> {}
+
+const Repricing = Schema.Struct({
+  version: Schema.Literal(1),
+  completed: Schema.Array(CompletedReprice),
+});
+
+/**
+ * Reads `repricing.json`, the reprices this installation finished. A missing, unreadable, or
+ * undecodable file holds none: forgetting one only sends its buckets again, and the server
+ * applies a repeated reprice as it did the first.
+ */
+export const loadRepricing = Effect.fn("Settings.loadRepricing")(function* (directory: string) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+
+  return yield* fs.readFileString(path.join(directory, "repricing.json")).pipe(
+    Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(Repricing))),
+    Effect.map((repricing): ReadonlyArray<CompletedReprice> => repricing.completed),
+    Effect.orElseSucceed((): ReadonlyArray<CompletedReprice> => []),
+  );
+});
+
+/**
+ * Replaces `repricing.json` with `completed`. The file is complete before it takes the name,
+ * so a concurrent sync never reads half of it; two syncs saving at once keep the later list.
+ */
+export const saveRepricing = Effect.fn("Settings.saveRepricing")(function* (
+  directory: string,
+  completed: ReadonlyArray<CompletedReprice>,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const file = path.join(directory, "repricing.json");
+
+  yield* Effect.gen(function* () {
+    const repricing = yield* Schema.encodeEffect(Repricing)({ version: 1, completed });
+
+    yield* fs.makeDirectory(directory, { recursive: true });
+
+    const temporaryDirectory = yield* fs.makeTempDirectoryScoped({
+      directory,
+      prefix: ".repricing-",
+    });
+
+    const temporary = path.join(temporaryDirectory, "repricing.json");
+
+    yield* fs.writeFileString(temporary, `${JSON.stringify(repricing, null, 2)}\n`, { flag: "wx" });
+    yield* fs.rename(temporary, file);
+  }).pipe(
+    Effect.scoped,
+    // Sync output names no local paths beyond the settings directory's own files.
+    Effect.mapError(
+      () => new SettingsError({ message: "Cannot save repricing.json in the settings directory." }),
+    ),
+  );
 });

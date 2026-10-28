@@ -3,7 +3,8 @@
 A ChatGPT OAuth proxy used by VS Code Copilot can append one JSON object per line to
 `chatgpt-proxy.jsonl` in the per-user directory below. Token Ledger discovers `*.jsonl`
 files directly inside that directory during `sync`, including a first history upload.
-`report` continues to show API-equivalent estimates without reading billing hints.
+`report` reads no billing hints, so it prices every Copilot request, routed or not, as
+Copilot-paid, with Copilot's rate card.
 
 | OS      | Default directory                                                                                   |
 | ------- | --------------------------------------------------------------------------------------------------- |
