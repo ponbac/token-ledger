@@ -1,6 +1,6 @@
 import { homedir, userInfo } from "node:os";
 
-import { Data, Effect, FileSystem, Match, Option, Path, Schema } from "effect";
+import { Data, Effect, FileSystem, Match, Option, Path, Schema, Stream } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import { configHome, scheduleSettled, settingsDirectory, settleSchedule } from "./settings.ts";
@@ -114,6 +114,11 @@ const Action = Data.taggedEnum<Action>();
 export interface DailyJob {
   readonly at: TimeOfDay;
   readonly retime: (every: Interval) => ReadonlyArray<Action>;
+  /**
+   * Puts back what a failed `retime` may have changed, so the next sync still finds the job
+   * once a day and tries again.
+   */
+  readonly undo: ReadonlyArray<Action>;
 }
 
 /** A platform's scheduler, as the actions that install, remove, and inspect the scheduled sync. */
@@ -296,22 +301,23 @@ ExecStart=/bin/sh -lc ${systemdQuoted(posixScript(job))}
     dailyJob: readJob(timer).pipe(
       Effect.map(
         Option.flatMap((contents) =>
-          Option.flatMap(
-            Option.fromNullishOr(/^OnCalendar=\*-\*-\* (\d{2}):(\d{2}):00$/m.exec(contents)),
-            ([, hour = "", minute = ""]) => dailyAt(hour, minute),
+          Option.map(
+            Option.flatMap(
+              Option.fromNullishOr(/^OnCalendar=\*-\*-\* (\d{2}):(\d{2}):00$/m.exec(contents)),
+              ([, hour = "", minute = ""]) => dailyAt(hour, minute),
+            ),
+            (at): DailyJob => ({
+              at,
+              retime: (every) => [
+                Action.Write({ file: timer, contents: timerUnit({ at, every }) }),
+                systemctl("required", ["daemon-reload"]),
+                // Restarting only a running timer leaves one the user stopped stopped.
+                systemctl("required", ["try-restart", `${unit}.timer`]),
+              ],
+              undo: [Action.Write({ file: timer, contents })],
+            }),
           ),
         ),
-      ),
-      Effect.map(
-        Option.map((at) => ({
-          at,
-          retime: (every: Interval) => [
-            Action.Write({ file: timer, contents: timerUnit({ at, every }) }),
-            systemctl("required", ["daemon-reload"]),
-            // Restarting only a running timer leaves one the user stopped stopped.
-            systemctl("required", ["try-restart", `${unit}.timer`]),
-          ],
-        })),
       ),
     ),
   };
@@ -436,6 +442,7 @@ export function launchAgent(home: string, uid: number): Scheduler {
                       shown: `/bin/sh -c '${reloadAgent}' sh ${domain}/${label} ${domain} ${plist}`,
                     }),
                   ],
+                  undo: [Action.Write({ file: plist, contents })],
                 }))
               : Option.none();
           }),
@@ -481,13 +488,14 @@ const taskTrigger = (job: Pick<ScheduledSync, "at" | "every">) => [
 
 /**
  * Prints the local time a once-a-day task starts at, and nothing for no task or another
- * interval. Its start boundary keeps the time the task was registered with, even where it
- * records an offset that has changed since.
+ * interval; any other failure exits non-zero. Its start boundary keeps the time the task was
+ * registered with, even where it records an offset that has changed since.
  */
 const dailyTaskScript = [
   "$ErrorActionPreference = 'Stop'",
-  `$task = Get-ScheduledTask -TaskName ${powershellString(task)} -ErrorAction SilentlyContinue`,
-  "if ($task -and @($task.Triggers).Count -eq 1) {",
+  `try { $task = Get-ScheduledTask -TaskName ${powershellString(task)} }`,
+  "catch { if ($_.CategoryInfo.Category -eq 'ObjectNotFound') { exit 0 }; throw }",
+  "if (@($task.Triggers).Count -eq 1) {",
   "  $trigger = @($task.Triggers)[0]",
   "  if ($trigger.CimClass.CimClassName -eq 'MSFT_TaskDailyTrigger' -and $trigger.DaysInterval -eq 1 -and -not $trigger.Repetition.Interval) {",
   "    $trigger.StartBoundary.Substring(11, 5)",
@@ -562,16 +570,36 @@ export function taskScheduler(file: string): Scheduler {
     dailyJob: Effect.gen(function* () {
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
 
-      const lines = yield* spawner
-        .lines(ChildProcess.make("powershell.exe", powershellArguments(dailyTaskScript)))
+      // A query that fails is not an absent task: that would record the schedule as moved.
+      const [output, code] = yield* spawner
+        .spawn(
+          ChildProcess.make("powershell.exe", powershellArguments(dailyTaskScript), {
+            stdin: "ignore",
+            stderr: "inherit",
+          }),
+        )
         .pipe(
+          Effect.flatMap((handle) =>
+            Effect.all(
+              [handle.stdout.pipe(Stream.decodeText(), Stream.mkString), handle.exitCode],
+              {
+                concurrency: "unbounded",
+              },
+            ),
+          ),
+          Effect.scoped,
           Effect.mapError(
             () => new ScheduleError({ message: "Cannot ask Task Scheduler about the task." }),
           ),
         );
 
+      if (code !== 0)
+        return yield* new ScheduleError({
+          message: `Task Scheduler could not report the task; PowerShell exited with code ${code}.`,
+        });
+
       return Option.map(
-        Option.filter(Option.fromUndefinedOr(lines[0]?.trim()), isTimeOfDay),
+        Option.filter(Option.fromUndefinedOr(output.split("\n")[0]?.trim()), isTimeOfDay),
         (at): DailyJob => ({
           at,
           // Changing only the trigger keeps the task's launcher and settings, and a sync
@@ -585,6 +613,8 @@ export function taskScheduler(file: string): Scheduler {
               ].join("\n"),
             ),
           ],
+          // Setting the trigger changes the task whole or not at all.
+          undo: [],
         }),
       );
     }),
@@ -738,7 +768,10 @@ export const retimeDailySchedule = Effect.fn("Schedule.retimeDailySchedule")(fun
     ? yield* scheduler.value.dailyJob
     : Option.none<DailyJob>();
 
-  if (Option.isSome(daily)) yield* perform(daily.value.retime(defaultInterval));
+  if (Option.isSome(daily))
+    yield* perform(daily.value.retime(defaultInterval)).pipe(
+      Effect.tapError(() => Effect.ignore(perform(daily.value.undo))),
+    );
 
   yield* settleSchedule(directory);
 

@@ -772,6 +772,14 @@ suite("Task Scheduler task", () => {
         ].join("\n"),
       ]);
 
+      // A failed query is not an absent task, so the next sync asks again.
+      const failed = yield* tasks.dailyJob.pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, scheduler(() => 1).spawner),
+        Effect.result,
+      );
+
+      assert.isTrue(Result.isFailure(failed));
+
       for (const output of ["", "PT2H\r\n"]) {
         const none = yield* tasks.dailyJob.pipe(
           Effect.provideService(
@@ -797,6 +805,14 @@ suite("Task Scheduler task", () => {
             ChildProcess.make("powershell.exe", powershellArguments(script), { stdin: "ignore" }),
           );
 
+        const tasks = taskScheduler("C:\\unused\\token-ledger-sync.js");
+
+        yield* Effect.ignore(
+          powershell("Unregister-ScheduledTask -TaskName 'token-ledger sync' -Confirm:$false"),
+        );
+
+        assert.isTrue(Option.isNone(yield* tasks.dailyJob));
+
         // As schedule install registered it before --every.
         yield* Effect.acquireRelease(
           powershell(
@@ -813,7 +829,6 @@ suite("Task Scheduler task", () => {
             ),
         );
 
-        const tasks = taskScheduler("C:\\unused\\token-ledger-sync.js");
         const job = daily(yield* tasks.dailyJob);
 
         assert.strictEqual(job.at, "12:30");
@@ -840,18 +855,28 @@ suite("retiming a once-a-day schedule", () => {
         const path = yield* Path.Path;
         const config = yield* fs.makeTempDirectoryScoped();
         const timer = path.join(config, "systemd", "user", "token-ledger-sync.timer");
-        const { lines, spawner } = scheduler(() => 0);
+        const settings = path.join(config, "token-ledger");
+        let session = false;
+        const { lines, spawner } = scheduler(() => (session ? 0 : 1));
 
         yield* fs.makeDirectory(path.dirname(timer), { recursive: true });
         yield* fs.writeFileString(timer, dailyTimer);
 
-        const retime = retimeDailySchedule(path.join(config, "token-ledger")).pipe(
+        const retime = retimeDailySchedule(settings).pipe(
           Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
           Effect.provideService(
             ConfigProvider.ConfigProvider,
             ConfigProvider.fromEnv({ env: { XDG_CONFIG_HOME: config } }),
           ),
         );
+
+        // Without a user session, the timer is put back and nothing is recorded.
+        assert.isTrue(Result.isFailure(yield* Effect.result(retime)));
+        assert.strictEqual(yield* fs.readFileString(timer), dailyTimer);
+        assert.isFalse(yield* fs.exists(path.join(settings, "schedule.json")));
+
+        session = true;
+        lines.length = 0;
 
         assert.deepStrictEqual(
           yield* retime,
