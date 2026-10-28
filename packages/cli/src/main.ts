@@ -221,9 +221,8 @@ const usageRequest = Effect.fn("CLI.usageRequest")(function* (
     { provider: "codex", path: path.join(expand(codexHome), "archived_sessions") },
     { provider: "claude", path: path.join(expand(claudeHome), "projects") },
     { provider: "grok", path: path.join(expand(grokHome), "sessions") },
-    // Session logs first: where a telemetry export holds the same request, the session's copy,
-    // which names its workspace, is the one counted. Only Copilot CLI and VS Code's Copilot
-    // harness keep them, so a machine without the folder reads only the export, as before.
+    // Only Copilot CLI and VS Code's Copilot harness keep session logs, so a machine without
+    // the folder reads only the export, as before.
     ...((yield* fs.exists(copilotSessions))
       ? [{ provider: "copilot", path: copilotSessions } satisfies Source]
       : []),

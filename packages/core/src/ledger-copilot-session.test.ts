@@ -3,7 +3,7 @@ import { assert, describe, it } from "@effect/vitest";
 import { DateTime, Effect, FileSystem, Layer, Path } from "effect";
 
 import { Ledger } from "./ledger.ts";
-import { PriceBook, ReportRequest, totalTokens, type Source } from "./model.ts";
+import { PriceBook, ReportRequest, totalTokens, type Source, type UsageReport } from "./model.ts";
 
 const runtime = Ledger.layer.pipe(Layer.provideMerge(NodeServices.layer));
 
@@ -181,6 +181,21 @@ describe("Copilot session logs through the public interface", () => {
     }).pipe(Effect.provide(runtime)),
   );
 
+  it.effect("counts the same whatever the order of sources", () =>
+    Effect.gen(function* () {
+      const { sources } = yield* fixture();
+      const ledger = yield* Ledger;
+
+      const rows = (report: UsageReport) =>
+        report.rows.map((row) => [row.project, row.records, totalTokens(row.tokens)]);
+
+      assert.deepStrictEqual(
+        rows(yield* ledger.report(request(sources.toReversed()))),
+        rows(yield* ledger.report(request(sources))),
+      );
+    }).pipe(Effect.provide(runtime)),
+  );
+
   it.effect("bills a request the local proxy routed to ChatGPT there, BYOK or not", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -299,6 +314,22 @@ describe("VS Code exports that reuse a turn's response ID", () => {
       "an event logged twice beside the spans",
       [span(1, "turn"), span(2, "turn"), ...[1, 2, 2].map((n) => event(n, "turn", "agent"))],
       ["Unassigned", 2, 300],
+    ],
+    [
+      "events under an agent span naming the repository their spans do not",
+      [
+        JSON.stringify({
+          traceId: "turn",
+          spanId: "agent",
+          endTime: [turn + 4, 0],
+          attributes: {
+            "gen_ai.operation.name": "invoke_agent",
+            "github.copilot.git.repository": "acme/agent",
+          },
+        }),
+        ...requests.flatMap((n) => [span(n, "turn"), event(n, "turn", "agent")]),
+      ],
+      ["acme/agent", 3, 600],
     ],
     [
       "events naming the repository their spans do not",

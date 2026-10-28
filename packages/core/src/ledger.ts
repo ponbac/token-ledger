@@ -223,6 +223,9 @@ export class Ledger extends Context.Service<
         const inherited: Array<Effect.Effect<void>> = [];
         // Records only every source can classify as originals or copies; run before the copies.
         const deferred: Array<Effect.Effect<void>> = [];
+        // Copilot export records wait for every source, so whatever the order of sources, a
+        // session log's copy of a request wins and its BYOK exclusions apply.
+        const exported: Array<Effect.Effect<void>> = [];
         // OpenCode matches a fork's copies to originals in any of its databases and files.
         const opencode = opencodeHistory((value) => path.normalize(value));
 
@@ -255,7 +258,10 @@ export class Ledger extends Context.Service<
             collect(record, yield* resolveProject(record, source.project), slot);
           });
 
-          const accept = Effect.fn("Ledger.acceptRecords")(function* (result: ParseResult) {
+          const accept = Effect.fn("Ledger.acceptRecords")(function* (
+            result: ParseResult,
+            waits = false,
+          ) {
             malformedLines += result.malformed;
             skippedRecords += result.skipped;
 
@@ -271,7 +277,10 @@ export class Ledger extends Context.Service<
             for (const record of result.records) {
               const slot = locate(record.timestamp);
 
-              if (slot !== undefined && totalTokens(record.tokens) > 0) yield* place(record, slot);
+              if (slot === undefined || totalTokens(record.tokens) === 0) continue;
+
+              if (waits) exported.push(Effect.suspend(() => place(record, slot)));
+              else yield* place(record, slot);
             }
 
             for (const record of result.inherited) {
@@ -410,7 +419,7 @@ export class Ledger extends Context.Service<
             }
           }
 
-          if (copilot?.finish !== undefined) yield* accept(copilot.finish());
+          if (copilot?.finish !== undefined) yield* accept(copilot.finish(), true);
 
           const hintsFailed = source.provider === "copilot" && Result.isFailure(hints);
 
@@ -451,6 +460,8 @@ export class Ledger extends Context.Service<
             warnings: [...warnings],
           }));
         }
+
+        for (const copy of exported) yield* copy;
 
         for (const legacy of deferred) yield* legacy;
 

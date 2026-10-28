@@ -277,12 +277,29 @@ export function copilotParser(
       }
 
       // A span takes the repository its paired event names when it names none.
+      // A request's own repository, or else the nearest one among the spans enclosing it.
+      const inheritedRepository = (candidate: Candidate) => {
+        let repository = candidate.record.repository;
+        let key = candidate.spanKey;
+        const visited = new Set<string>();
+
+        while (repository === null && key !== undefined && !visited.has(key)) {
+          visited.add(key);
+          const ancestor = spans.get(key);
+          repository = ancestor?.repository ?? null;
+          key = ancestor?.parent;
+        }
+
+        return repository;
+      };
+
       const pairedRepositories = new Map<number, RepositoryReference>();
 
       for (const [event, span] of paired) {
-        const repository = candidates[event]?.record.repository;
+        const candidate = candidates[event];
+        const repository = candidate === undefined ? null : inheritedRepository(candidate);
 
-        if (repository) pairedRepositories.set(span, repository);
+        if (repository !== null) pairedRepositories.set(span, repository);
       }
 
       const identified = candidates.flatMap((candidate, index): Candidate[] => {
@@ -321,17 +338,7 @@ export function copilotParser(
       const preferred = new Map<string, Candidate>();
 
       for (const candidate of identified) {
-        let repository = candidate.record.repository;
-        let key = candidate.spanKey;
-        const visited = new Set<string>();
-
-        while (repository === null && key !== undefined && !visited.has(key)) {
-          visited.add(key);
-          const ancestor = spans.get(key);
-          repository = ancestor?.repository ?? null;
-          key = ancestor?.parent;
-        }
-
+        const repository = inheritedRepository(candidate);
         const resolved = { ...candidate, record: { ...candidate.record, repository } };
         const previous = preferred.get(resolved.record.id);
 
