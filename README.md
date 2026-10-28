@@ -151,7 +151,8 @@ records each request's model and tokens whether or not an export is on, and the 
 working directory and GitHub repository, which name the project. Those logs also hold the
 session's prompts, responses, and tool output: Token Ledger decodes only the session start
 and usage events, and never reads the rest. Requests on your own key (BYOK) are not
-Copilot's to bill and are left out. A request also found in Copilot's export below is
+Copilot's to bill and are left out of syncs, unless the local proxy routed them to a ChatGPT
+plan; a report, which reads no proxy hints, counts them. A request also found in Copilot's export below is
 counted once.
 
 The Copilot harness runs in VS Code's Agent Host, which ignores the Chat export settings

@@ -121,11 +121,12 @@ export function isSessionEvents(file: string): boolean {
  * telemetry export gives the same request, so a request in both is counted once. Input counts
  * include cache reads and writes, as in the export. A request the local proxy routed to a ChatGPT plan is billed to it,
  * as in the export. Other requests on a person's own key (BYOK) are not Copilot's to bill: they
- * are excluded, so an export's copy of one is not counted either.
+ * are excluded, so an export's copy of one is not counted either. Without `chatgptRequests`,
+ * as in a report, which BYOK requests the proxy routed is unknown, and all are counted.
  */
 export function copilotSessionParser(
   file: string,
-  chatgptRequests: ReadonlyMap<string, ChatgptRequest> = new Map(),
+  chatgptRequests?: ReadonlyMap<string, ChatgptRequest>,
 ): TranscriptParser {
   let session: string | undefined;
   let cwd: string | null = null;
@@ -193,9 +194,9 @@ export function copilotSessionParser(
 
       // The local proxy's hint, keyed by the response ID, names a ChatGPT plan as the payer.
       const routed =
-        usage.apiCallId === undefined ? undefined : chatgptRequests.get(usage.apiCallId);
+        usage.apiCallId === undefined ? undefined : chatgptRequests?.get(usage.apiCallId);
 
-      if (usage.isByok === true && routed === undefined)
+      if (usage.isByok === true && chatgptRequests !== undefined && routed === undefined)
         return id === undefined ? empty : { ...empty, excluded: [id] };
       const ms = timestamp(event.timestamp);
 

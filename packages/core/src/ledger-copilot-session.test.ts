@@ -151,6 +151,8 @@ const fixture = Effect.fn("Test.fixture")(function* () {
 });
 
 describe("Copilot session logs through the public interface", () => {
+  // A report reads no proxy hints, so it cannot tell a routed BYOK request from another, and
+  // counts it; a sync, which reads them, excludes one the proxy did not route.
   it.effect("counts each request once, in its session's repository, without reading prompts", () =>
     Effect.gen(function* () {
       const { sources } = yield* fixture();
@@ -164,7 +166,7 @@ describe("Copilot session logs through the public interface", () => {
             1,
             { input: 40, output: 10, cacheRead: 0, cacheWrite: 0 },
           ],
-          ["github.com/acme/alpha", 1, { input: 20, output: 10, cacheRead: 60, cacheWrite: 20 }],
+          ["github.com/acme/alpha", 2, { input: 120, output: 20, cacheRead: 60, cacheWrite: 20 }],
           ["Unassigned", 1, { input: 10, output: 10, cacheRead: 10, cacheWrite: 30 }],
         ],
       );
@@ -179,6 +181,58 @@ describe("Copilot session logs through the public interface", () => {
       // The export's copies of the session's request and of its BYOK request.
       assert.strictEqual(report.coverage[1]?.duplicates, 2);
     }).pipe(Effect.provide(runtime)),
+  );
+
+  it.effect(
+    "names a session's request by its export's repository when the session names none",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "token-ledger-session-test-" });
+        const sessions = path.join(root, "session-state");
+        const exports = path.join(root, "otel");
+
+        yield* fs.makeDirectory(path.join(sessions, "bare"), { recursive: true });
+        yield* fs.makeDirectory(exports);
+        yield* fs.writeFileString(
+          path.join(sessions, "bare", "events.jsonl"),
+          [
+            JSON.stringify({ type: "session.start", data: { sessionId: "bare" } }),
+            usage("call-x", { input: 100, read: 0, write: 0 }),
+          ].join("\n"),
+        );
+        yield* fs.writeFileString(
+          path.join(exports, "usage.jsonl"),
+          JSON.stringify({
+            type: "span",
+            traceId: "trace",
+            spanId: "call-x",
+            endTime: [Date.parse("2026-09-22T10:00:00Z") / 1000, 0],
+            attributes: {
+              "gen_ai.operation.name": "chat",
+              "gen_ai.response.id": "call-x",
+              "gen_ai.response.model": "test-model",
+              "gen_ai.usage.input_tokens": 100,
+              "gen_ai.usage.output_tokens": 10,
+              "github.copilot.git.repository": "acme/exported",
+            },
+          }),
+        );
+        const ledger = yield* Ledger;
+
+        const report = yield* ledger.report(
+          request([
+            { provider: "copilot", path: sessions },
+            { provider: "copilot", path: exports },
+          ]),
+        );
+
+        assert.deepStrictEqual(
+          report.rows.map((row) => [row.project, row.records]),
+          [["acme/exported", 1]],
+        );
+      }).pipe(Effect.provide(runtime)),
   );
 
   it.effect("counts the same whatever the order of sources", () =>
@@ -236,7 +290,15 @@ describe("Copilot session logs through the public interface", () => {
   it.effect("uploads no prompt text, session ID, or local path", () =>
     Effect.gen(function* () {
       const { root, sources } = yield* fixture();
-      const payload = yield* (yield* Ledger).syncPayload(request(sources), client);
+
+      // As the CLI does: no hints directory means no request was routed.
+      const payload = yield* (yield* Ledger).syncPayload(
+        {
+          ...request(sources),
+          billingHints: { directory: `${root}/no-hints`, required: false },
+        },
+        client,
+      );
 
       assert.deepStrictEqual(
         payload.buckets.map((bucket) => [bucket.project, totalTokens(bucket.tokens)]),

@@ -201,6 +201,13 @@ export class Ledger extends Context.Service<
           ? hints.success
           : new Map<string, ChatgptRequest>();
 
+        // Only a sync reads the hints. Without them, which BYOK requests the proxy routed is
+        // unknown, and a session log counts them all.
+        const routing =
+          notice !== undefined && request.billingHints !== undefined && Result.isSuccess(hints)
+            ? chatgptRequests
+            : undefined;
+
         if (Result.isFailure(hints))
           yield* (
             onWarning?.(
@@ -223,9 +230,18 @@ export class Ledger extends Context.Service<
         const inherited: Array<Effect.Effect<void>> = [];
         // Records only every source can classify as originals or copies; run before the copies.
         const deferred: Array<Effect.Effect<void>> = [];
-        // Copilot export records wait for every source, so whatever the order of sources, a
-        // session log's copy of a request wins and its BYOK exclusions apply.
-        const exported: Array<Effect.Effect<void>> = [];
+
+        // Copilot records wait for every source, then each request's copies merge: a session
+        // log's copy wins whatever the order of sources, an export's names a repository the
+        // session's lacks, and a session's BYOK exclusion covers every copy.
+        const copilotCopies: Array<{
+          readonly record: UsageRecord;
+          readonly slot: Slot;
+          readonly fromSession: boolean;
+          readonly place: (record: UsageRecord, slot: Slot) => Effect.Effect<void>;
+        }> = [];
+
+        const copilotExcluded = new Set<string>();
         // OpenCode matches a fork's copies to originals in any of its databases and files.
         const opencode = opencodeHistory((value) => path.normalize(value));
 
@@ -258,16 +274,17 @@ export class Ledger extends Context.Service<
             collect(record, yield* resolveProject(record, source.project), slot);
           });
 
+          /** `fromSession` for a Copilot session log's results; Copilot records wait for every source. */
           const accept = Effect.fn("Ledger.acceptRecords")(function* (
             result: ParseResult,
-            waits = false,
+            fromSession = false,
           ) {
             malformedLines += result.malformed;
             skippedRecords += result.skipped;
 
             for (const warning of result.warnings) warnings.add(warning);
 
-            for (const id of result.excluded) seen.add(`${source.provider}:${id}`);
+            for (const id of result.excluded) copilotExcluded.add(id);
 
             for (const hint of result.hints) {
               if (locate(hint.timestamp) !== undefined)
@@ -279,7 +296,8 @@ export class Ledger extends Context.Service<
 
               if (slot === undefined || totalTokens(record.tokens) === 0) continue;
 
-              if (waits) exported.push(Effect.suspend(() => place(record, slot)));
+              if (source.provider === "copilot")
+                copilotCopies.push({ record, slot, fromSession, place });
               else yield* place(record, slot);
             }
 
@@ -341,7 +359,7 @@ export class Ledger extends Context.Service<
               Match.when("grok", () => grokParser(canonical)),
               Match.when("copilot", () =>
                 isSessionEvents(file)
-                  ? copilotSessionParser(canonical, chatgptRequests)
+                  ? copilotSessionParser(canonical, routing)
                   : (copilot ?? copilotParser(canonical)),
               ),
               Match.when("pi", () => piParser(canonical)),
@@ -373,7 +391,7 @@ export class Ledger extends Context.Service<
                   lineNumber++;
 
                   if (!line.trim()) return;
-                  yield* accept(parser.parse(line, lineNumber));
+                  yield* accept(parser.parse(line, lineNumber), parser !== copilot);
                 }),
               ),
             );
@@ -419,7 +437,7 @@ export class Ledger extends Context.Service<
             }
           }
 
-          if (copilot?.finish !== undefined) yield* accept(copilot.finish(), true);
+          if (copilot?.finish !== undefined) yield* accept(copilot.finish());
 
           const hintsFailed = source.provider === "copilot" && Result.isFailure(hints);
 
@@ -461,7 +479,28 @@ export class Ledger extends Context.Service<
           }));
         }
 
-        for (const copy of exported) yield* copy;
+        const requests = new Map<string, Array<(typeof copilotCopies)[number]>>();
+
+        for (const copy of copilotCopies)
+          requests.set(copy.record.id, [...(requests.get(copy.record.id) ?? []), copy]);
+
+        for (const [id, copies] of requests) {
+          const primary = copies.find((copy) => copy.fromSession) ?? copies[0];
+
+          if (primary === undefined) continue;
+
+          if (copilotExcluded.has(id)) seen.add(`copilot:${id}`);
+
+          const repository =
+            primary.record.repository ??
+            copies.find((copy) => copy.record.repository !== null)?.record.repository ??
+            null;
+
+          yield* primary.place({ ...primary.record, repository }, primary.slot);
+
+          for (const copy of copies)
+            if (copy !== primary) yield* copy.place(copy.record, copy.slot);
+        }
 
         for (const legacy of deferred) yield* legacy;
 
