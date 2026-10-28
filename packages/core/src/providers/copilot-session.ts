@@ -2,7 +2,7 @@ import { Option, Schema } from "effect";
 
 import type { ChatgptRequest } from "../billing-hints.ts";
 import { RepositoryReference, type UsageRecord } from "../model.ts";
-import { isOwnerAndName } from "./copilot.ts";
+import { isOwnerAndName, requestId } from "./copilot.ts";
 import { decodeJson, empty, skipped, timestamp, type TranscriptParser } from "./shared.ts";
 
 /**
@@ -117,9 +117,9 @@ export function isSessionEvents(file: string): boolean {
  * Reads one session's event log. Its `session.start`, and any later `session.context_changed`,
  * name the workspace: the working directory, which project mappings and Git discovery read, and
  * the GitHub repository Copilot recorded, which names the project when the directory is gone.
- * Each `session.usage_record` is one request, keyed by the response ID a telemetry export gives
- * the same request, so a request in both is counted once. Input counts include cache reads and
- * writes, as in the export. A request the local proxy routed to a ChatGPT plan is billed to it,
+ * Each `session.usage_record` is one request, known by the response ID and token counts a
+ * telemetry export gives the same request, so a request in both is counted once. Input counts
+ * include cache reads and writes, as in the export. A request the local proxy routed to a ChatGPT plan is billed to it,
  * as in the export. Other requests on a person's own key (BYOK) are not Copilot's to bill: they
  * are excluded, so an export's copy of one is not counted either.
  */
@@ -174,9 +174,19 @@ export function copilotSessionParser(
       const usage = event.data.usage;
       const usageId = usage.accounting?.usageId;
 
+      const cacheRead = usage.cacheReadTokens ?? 0;
+      const cacheWrite = usage.cacheWriteTokens ?? 0;
+
+      const tokens = {
+        input: usage.inputTokens - cacheRead - cacheWrite,
+        output: usage.outputTokens,
+        cacheRead,
+        cacheWrite,
+      };
+
       const id =
         usage.apiCallId !== undefined
-          ? `response:${usage.apiCallId}`
+          ? requestId(usage.apiCallId, tokens)
           : usageId === undefined
             ? undefined
             : `usage:${usageId}`;
@@ -187,8 +197,6 @@ export function copilotSessionParser(
 
       if (usage.isByok === true && routed === undefined)
         return id === undefined ? empty : { ...empty, excluded: [id] };
-      const cacheRead = usage.cacheReadTokens ?? 0;
-      const cacheWrite = usage.cacheWriteTokens ?? 0;
       const ms = timestamp(event.timestamp);
 
       if (ms === null || id === undefined || cacheRead + cacheWrite > usage.inputTokens)
@@ -206,12 +214,7 @@ export function copilotSessionParser(
           (routed === undefined || routed.repository === null
             ? null
             : RepositoryReference.Remote({ value: routed.repository })),
-        tokens: {
-          input: usage.inputTokens - cacheRead - cacheWrite,
-          output: usage.outputTokens,
-          cacheRead,
-          cacheWrite,
-        },
+        tokens,
       };
 
       return {

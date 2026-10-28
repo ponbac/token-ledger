@@ -69,6 +69,13 @@ interface Candidate {
   readonly hinted?: UsageRecord["repository"];
 }
 
+/**
+ * A Copilot request's identity: its response ID with its prompt and output token counts, as
+ * every copy of the request reports them. Prompt counts include cache reads and writes.
+ */
+export const requestId = (responseId: string, tokens: UsageRecord["tokens"]) =>
+  `response:${responseId}#${tokens.input + tokens.cacheRead + tokens.cacheWrite}:${tokens.output}`;
+
 /** Whether Copilot named a GitHub repository as `owner/name`, its identity on GitHub. */
 export const isOwnerAndName = (repository: string) =>
   /^[A-Za-z0-9-]+\/(?!\.{1,2}$)[A-Za-z0-9_.-]+$/.test(repository);
@@ -209,36 +216,16 @@ export function copilotParser(
         return shared?.size === 1 ? [...shared][0] : candidate.responseId;
       });
 
-      // VS Code's Local harness gives every request of a turn the turn's response ID. Where
-      // one ID carries several requests, each goes by the ID and its prompt and output token
-      // counts, which differ between a turn's requests as its context grows. A request's span
-      // and event, in one export or two, then share an identity and count once, while the
-      // turn's other requests count separately.
-      const usage = ({ tokens }: UsageRecord) =>
-        `${tokens.input + tokens.cacheRead + tokens.cacheWrite}:${tokens.output}`;
-
-      const usages = new Map<string, Set<string>>();
-
-      candidates.forEach((candidate, index) => {
-        const responseId = responses[index];
-
-        if (responseId !== undefined)
-          usages.set(
-            responseId,
-            (usages.get(responseId) ?? new Set()).add(usage(candidate.record)),
-          );
-      });
-
+      // VS Code's Local harness gives every request of a turn the turn's response ID, so a
+      // request goes by the ID and its prompt and output token counts, which differ between a
+      // turn's requests as its context grows. Every copy of a request, a span or an event in any
+      // export or a session log, shares that identity, however few of the turn's requests each
+      // source holds, and counts once.
       const identified = candidates.map((candidate, index): Candidate => {
         const responseId = responses[index];
 
         if (responseId === undefined) return candidate;
-
-        const id =
-          (usages.get(responseId)?.size ?? 0) > 1
-            ? `response:${responseId}#${usage(candidate.record)}`
-            : `response:${responseId}`;
-
+        const id = requestId(responseId, candidate.record.tokens);
         const record = { ...candidate.record, id };
         const routed = chatgptRequests.get(responseId);
 

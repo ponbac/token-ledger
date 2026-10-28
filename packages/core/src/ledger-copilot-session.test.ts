@@ -368,6 +368,32 @@ describe("VS Code exports that reuse a turn's response ID", () => {
     ],
   ];
 
+  it.effect("counts each request once beside an export holding only some of its turn", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "token-ledger-turn-test-" });
+      const whole = path.join(root, "whole.jsonl");
+      const partial = path.join(root, "partial.jsonl");
+
+      yield* fs.writeFileString(whole, [1, 2].map((n) => span(n, "turn")).join("\n"));
+      yield* fs.writeFileString(partial, event(1, "turn", "agent"));
+      const ledger = yield* Ledger;
+
+      const report = yield* ledger.report(
+        request([
+          { provider: "copilot", path: partial },
+          { provider: "copilot", path: whole },
+        ]),
+      );
+
+      assert.deepStrictEqual(
+        report.rows.map((row) => [row.records, row.tokens.input]),
+        [[2, 300]],
+      );
+    }).pipe(Effect.provide(runtime)),
+  );
+
   it.effect("counts each request once with its spans and events in separate sources", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
