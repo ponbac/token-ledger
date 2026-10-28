@@ -209,74 +209,52 @@ export function copilotParser(
         return shared?.size === 1 ? [...shared][0] : candidate.responseId;
       });
 
-      // VS Code's Local harness gives every request of a turn the turn's response ID. Request
-      // spans sharing an ID are separate requests, counted by their own span keys. Each event
-      // sharing it pairs with one of those spans, by span key or by the same token counts within
-      // a second, and is left to it; an event no span accounts for counts by when it ended and
-      // what it used, so a repeated line still counts once.
-      const observed = ({ timestamp, tokens }: UsageRecord) =>
-        `${timestamp}:${tokens.input}:${tokens.output}`;
+      // VS Code's Local harness gives every request of a turn the turn's response ID. Where
+      // one ID carries several requests, each goes by the ID and its prompt and output token
+      // counts, which differ between a turn's requests as its context grows. A request's span
+      // and event, in one export or two, then share an identity and count once, while the
+      // turn's other requests count separately.
+      const usage = ({ tokens }: UsageRecord) =>
+        `${tokens.input + tokens.cacheRead + tokens.cacheWrite}:${tokens.output}`;
 
-      const promptTokens = ({ tokens }: UsageRecord) =>
-        tokens.input + tokens.cacheRead + tokens.cacheWrite;
-
-      const requests = new Map<string, { spans: number[]; events: number[] }>();
+      const usages = new Map<string, Set<string>>();
 
       candidates.forEach((candidate, index) => {
         const responseId = responses[index];
 
-        if (responseId === undefined) return;
-        const request = requests.get(responseId) ?? { spans: [], events: [] };
-        (candidate.isSpan ? request.spans : request.events).push(index);
-        requests.set(responseId, request);
+        if (responseId !== undefined)
+          usages.set(
+            responseId,
+            (usages.get(responseId) ?? new Set()).add(usage(candidate.record)),
+          );
       });
 
-      const reused = new Set<string>();
-      // Each event left to a span, by index, with the span that accounts for it.
-      const paired = new Map<number, number>();
+      const identified = candidates.map((candidate, index): Candidate => {
+        const responseId = responses[index];
 
-      for (const [responseId, { spans, events }] of requests) {
-        const spanKeys = new Set(spans.map((index) => candidates[index]?.spanKey));
+        if (responseId === undefined) return candidate;
 
-        const usages = new Set(
-          events.flatMap((index) => candidates[index]?.record ?? []).map(observed),
-        );
+        const id =
+          (usages.get(responseId)?.size ?? 0) > 1
+            ? `response:${responseId}#${usage(candidate.record)}`
+            : `response:${responseId}`;
 
-        if (spanKeys.size <= 1 && usages.size <= 1) continue;
-        reused.add(responseId);
-        const unpaired = [...spans];
-        // A repeated event line follows its first copy, so one request pairs once.
-        const settled = new Map<string, number | undefined>();
+        const record = { ...candidate.record, id };
+        const routed = chatgptRequests.get(responseId);
 
-        for (const index of events) {
-          const event = candidates[index];
+        if (routed === undefined) return { ...candidate, responseId, record };
 
-          if (event === undefined) continue;
-          const usage = observed(event.record);
+        return {
+          ...candidate,
+          responseId,
+          record: { ...record, billingProvider: "codex" },
+          hinted:
+            routed.repository === null
+              ? null
+              : RepositoryReference.Remote({ value: routed.repository }),
+        };
+      });
 
-          if (!settled.has(usage)) {
-            const match = unpaired.findIndex((spanIndex) => {
-              const span = candidates[spanIndex];
-
-              return (
-                span !== undefined &&
-                ((event.spanKey !== undefined && event.spanKey === span.spanKey) ||
-                  (promptTokens(event.record) === promptTokens(span.record) &&
-                    event.record.tokens.output === span.record.tokens.output &&
-                    Math.abs(event.record.timestamp - span.record.timestamp) <= 1000))
-              );
-            });
-
-            settled.set(usage, match === -1 ? undefined : unpaired.splice(match, 1)[0]);
-          }
-
-          const span = settled.get(usage);
-
-          if (span !== undefined) paired.set(index, span);
-        }
-      }
-
-      // A span takes the repository its paired event names when it names none.
       // A request's own repository, or else the nearest one among the spans enclosing it.
       const inheritedRepository = (candidate: Candidate) => {
         let repository = candidate.record.repository;
@@ -292,48 +270,6 @@ export function copilotParser(
 
         return repository;
       };
-
-      const pairedRepositories = new Map<number, RepositoryReference>();
-
-      for (const [event, span] of paired) {
-        const candidate = candidates[event];
-        const repository = candidate === undefined ? null : inheritedRepository(candidate);
-
-        if (repository !== null) pairedRepositories.set(span, repository);
-      }
-
-      const identified = candidates.flatMap((candidate, index): Candidate[] => {
-        const responseId = responses[index];
-
-        if (responseId === undefined) return [candidate];
-
-        if (paired.has(index)) return [];
-
-        const repository = candidate.record.repository ?? pairedRepositories.get(index) ?? null;
-
-        const id = !reused.has(responseId)
-          ? `response:${responseId}`
-          : candidate.isSpan
-            ? candidate.record.id
-            : `response:${responseId}@${observed(candidate.record)}`;
-
-        const record = { ...candidate.record, id, repository };
-        const routed = chatgptRequests.get(responseId);
-
-        if (routed === undefined) return [{ ...candidate, responseId, record }];
-
-        return [
-          {
-            ...candidate,
-            responseId,
-            record: { ...record, billingProvider: "codex" },
-            hinted:
-              routed.repository === null
-                ? null
-                : RepositoryReference.Remote({ value: routed.repository }),
-          },
-        ];
-      });
 
       const preferred = new Map<string, Candidate>();
 

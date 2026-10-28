@@ -332,11 +332,67 @@ describe("VS Code exports that reuse a turn's response ID", () => {
       ["acme/agent", 3, 600],
     ],
     [
+      "spans under their own repository, events under another agent's",
+      [
+        ...[
+          ["own", "acme/own"],
+          ["agent", "acme/agent"],
+        ].map(([spanId, repository]) =>
+          JSON.stringify({
+            traceId: "turn",
+            spanId,
+            endTime: [turn + 4, 0],
+            attributes: {
+              "gen_ai.operation.name": "invoke_agent",
+              "github.copilot.git.repository": repository,
+            },
+          }),
+        ),
+        ...requests.flatMap((n) => [
+          JSON.stringify({
+            traceId: "turn",
+            spanId: `request-${n}`,
+            parentSpanId: "own",
+            endTime: [turn + n, 0],
+            attributes: attributes(100 * n, "turn"),
+          }),
+          event(n, "turn", "agent"),
+        ]),
+      ],
+      ["acme/own", 3, 600],
+    ],
+    [
       "events naming the repository their spans do not",
       requests.flatMap((n) => [span(n, "turn"), event(n, "turn", "agent", "acme/turn")]),
       ["acme/turn", 3, 600],
     ],
   ];
+
+  it.effect("counts each request once with its spans and events in separate sources", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "token-ledger-turn-test-" });
+      const spans = path.join(root, "spans.jsonl");
+      const events = path.join(root, "events-export.jsonl");
+
+      yield* fs.writeFileString(spans, requests.map((n) => span(n, "turn")).join("\n"));
+      yield* fs.writeFileString(events, requests.map((n) => event(n, "turn", "agent")).join("\n"));
+      const ledger = yield* Ledger;
+
+      const report = yield* ledger.report(
+        request([
+          { provider: "copilot", path: events },
+          { provider: "copilot", path: spans },
+        ]),
+      );
+
+      assert.deepStrictEqual(
+        report.rows.map((row) => [row.records, row.tokens.input]),
+        [[3, 600]],
+      );
+    }).pipe(Effect.provide(runtime)),
+  );
 
   for (const [name, lines, expected] of cases)
     it.effect(`counts each request once: ${name}`, () =>
