@@ -162,10 +162,9 @@ export const saveSyncSettings = Effect.fn("Settings.saveSync")(function* (
 
 /**
  * A reprice this installation finished: it sent `server`, an origin, every bucket of
- * `provider` it could build from `from` up to its sync's window, priced on `basis`, and that
- * sync uploaded the window, which ends at `coveredUntil`. `from` is the hour the server named,
- * so the same answer on the same basis later, for a window starting by `coveredUntil`, means
- * only buckets this machine cannot reproduce are left.
+ * `provider` it could build from `from`, the hour the server named, up to its sync's window,
+ * priced on `basis`; that sync uploaded the window, which ends at `coveredUntil`. A missing
+ * or failed reprice is never saved, so the next sync tries it again.
  */
 export const CompletedReprice = Schema.Struct({
   server: Schema.String,

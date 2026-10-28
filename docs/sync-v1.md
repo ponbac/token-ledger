@@ -345,10 +345,8 @@ its basis, `from`, and the end of the sync's window. When discovery later names 
 `from` for the same basis, and the new window starts no later than that end, the provider is
 skipped: everything from `from` up to the window was sent on this basis, so the stale buckets
 left are ones the machine can no longer reproduce. A provider that waits is not remembered.
-`sync` prints each provider's `updated` and `unmatched` counts, or that it was skipped or did
-not finish, without tokens, paths, or history contents. A reprice that does not finish never
-changes the sync's exit code; the next sync tries again. `sync --dry-run` neither asks nor
-sends.
+Its report holds counts and outcomes, never tokens, paths, or history contents; the
+[README](../README.md#repricing-older-usage) shows it and how a user recovers.
 
 ## Privacy
 

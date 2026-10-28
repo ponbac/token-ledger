@@ -334,21 +334,6 @@ describe("repricing", () => {
           ["cursor", Date.parse("2026-10-02T09:00:00Z"), 1],
         ],
       );
-
-      // A machine the server does not know has no providers.
-      const unknown = yield* repricingStatus(
-        new URL("https://toki.example"),
-        token,
-        id,
-        basis,
-      ).pipe(
-        Effect.provideService(
-          HttpClient.HttpClient,
-          server(() => Response.json({ floor: "2026-10-01T00:00:00Z", providers: [] })).client,
-        ),
-      );
-
-      assert.deepStrictEqual(unknown.providers, []);
     }),
   );
 

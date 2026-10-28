@@ -836,13 +836,13 @@ Prices change: a token-ledger release can price requests differently, GitHub cha
 Copilot's rates, and you can change configured `prices`. Each upload names the pricing basis
 behind its costs, and a sync replaces only its own window, so hours before it keep the costs
 an older basis gave them. After each successful sync whose upload names a basis, `sync` asks
-the server which of this machine's stored usage, from the server's reprice floor on, another
-basis priced. For each tool with such usage before the window, it rebuilds that tool's hourly
-buckets from the first stale hour up to the window, exactly as an upload builds them, and
-sends them as a reprice-only upload. The server takes a new cost only for a stored bucket
-that matches exactly: the same hour, session, project, model, payer, token counts, and
-request count. It never adds or removes usage, so history a tool has since pruned, such as
-Claude Code's transcripts after 30 days, keeps its stored cost instead of disappearing.
+the server which of this machine's stored usage another basis priced, rebuilds each such
+tool's hourly buckets from the first stale hour up to the window, exactly as an upload builds
+them, and sends them as a reprice-only upload. The server takes a new cost only for a stored
+bucket that matches exactly. It never adds or removes usage, so history a tool has since
+pruned, such as Claude Code's transcripts after 30 days, keeps its stored cost instead of
+disappearing. [The repricing protocol](docs/sync-v1.md#repricing) has the matching rules,
+batching, and retries.
 
 `sync` prints, per tool, how many stored buckets took the new cost and how many of the
 buckets it sent matched none:
@@ -851,17 +851,13 @@ buckets it sent matched none:
 Repriced copilot from 2026-10-03 14:00 UTC · 12 buckets stored on an older pricing basis · sent 290 · 288 updated · 2 unmatched
 ```
 
-Finished reprices are remembered in `repricing.json` in the settings directory, per server
-and tool, with the end of the sync's window. When the server later names the same first hour
-for the same basis, and the new window starts by that end, the stale buckets left are ones
-this machine can no longer reproduce, and `sync` says it skipped them rather than sending
-them on every run; delete the file to send them again. A sync of a later window than that,
-after `--until` sent an earlier part of the history, reprices again. A tool whose history
-`sync` cannot find at all, for example because its directory is not mounted, is reported on
-stdout and not remembered, so a later sync that finds it reprices it. A reprice that does not
-finish, because the server is unreachable or refuses it or some history cannot be read, is
-reported on stderr and tried again on the next sync; it never changes the sync's exit code. A run that priced without vendor rates claims no basis and reprices nothing.
-`--provider` limits repricing to that tool, and `--dry-run` neither asks nor sends.
+A reprice that does not finish, because the server is unreachable or refuses it or a tool's
+history cannot be read or found, is reported and tried again on the next sync; it never
+changes the sync's exit code. Finished reprices are remembered in `repricing.json` in the
+settings directory, so stale buckets this machine can no longer reproduce are reported as
+skipped rather than sent on every run; delete the file to send them again. A run that priced
+without vendor rates claims no basis and reprices nothing. `--provider` limits repricing to
+that tool, and `--dry-run` neither asks nor sends.
 
 ## Accuracy and limitations
 

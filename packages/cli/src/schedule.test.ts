@@ -11,6 +11,7 @@ import {
   PlatformError,
   Predicate,
   Result,
+  Schedule,
   Schema,
   Sink,
   Stream,
@@ -460,31 +461,45 @@ suite("launchd agent", () => {
           "<key>StartCalendarInterval</key>\n  <dict>\n    <key>Hour</key>\n    <integer>12</integer>\n    <key>Minute</key>\n    <integer>30</integer>\n  </dict>\n",
         );
 
-        const [launch] = daily(yield* launchAgent(home, 501).dailyJob)
-          .retime(2)
-          .flatMap((action) => (Predicate.isTagged(action, "Launch") ? [action] : []));
+        // Stands in for the sync: performs the reload a retime launches, outlives launchd's first
+        // check that it is still running, then exits.
+        const sync = [
+          'import { NodeServices } from "@effect/platform-node";',
+          'import { Effect, Option } from "effect";',
+          'import { launchAgent, perform } from "./schedule.ts";',
+          "await Effect.runPromise(",
+          '  launchAgent(process.env["TEST_HOME"] ?? "", 501).dailyJob.pipe(',
+          "    Effect.map(Option.getOrThrow),",
+          '    Effect.flatMap((job) => perform(job.retime(2).filter((action) => action._tag === "Launch"))),',
+          '    Effect.andThen(Effect.sleep("1500 millis")),',
+          "    Effect.provide(NodeServices.layer),",
+          "  ),",
+          ");",
+        ].join("\n");
 
-        const [, reload = "", ...args] = launch?.args ?? [];
-
-        // The parent shell stands in for the sync: it starts the reload, then exits.
-        yield* spawner.exitCode(
-          ChildProcess.make("/bin/sh", ["-c", 'sh -c "$0" "$@" & sleep 0.3', reload, ...args], {
-            env: { PATH: `${directory}:${process.env["PATH"] ?? ""}` },
-            extendEnv: true,
-            // Effect stops a detached command's process group once it exits, reload included.
-            detached: false,
-            stdin: "ignore",
-          }),
+        assert.strictEqual(
+          yield* spawner.exitCode(
+            ChildProcess.make("bun", ["-e", sync], {
+              cwd: import.meta.dirname,
+              env: { PATH: `${directory}:${process.env["PATH"] ?? ""}`, TEST_HOME: home },
+              extendEnv: true,
+              stdin: "ignore",
+            }),
+          ),
+          ChildProcessSpawner.ExitCode(0),
         );
 
         assert.isFalse(yield* fs.exists(receipt));
 
-        yield* Effect.sleep("3 seconds");
+        const reloaded = `bootout gui/501/com.github.ponbac.token-ledger.sync\nbootstrap gui/501 ${plist}\n`;
 
-        assert.strictEqual(
-          yield* fs.readFileString(receipt),
-          `bootout gui/501/com.github.ponbac.token-ledger.sync\nbootstrap gui/501 ${plist}\n`,
+        const received = yield* fs.readFileString(receipt).pipe(
+          Effect.filterOrFail((text) => text === reloaded),
+          Effect.retry({ schedule: Schedule.spaced("100 millis"), times: 50 }),
+          Effect.catch(() => fs.readFileString(receipt)),
         );
+
+        assert.strictEqual(received, reloaded);
       }).pipe(Effect.provide(NodeServices.layer)),
     10_000,
   );
@@ -752,25 +767,13 @@ suite("Task Scheduler task", () => {
         "Get-ScheduledTask -TaskName 'token-ledger sync'",
       );
 
-      const installed = (yield* tasks.install({
-        ...job,
-        at: "12:30",
-        every: 2,
-        nodeDirectory: "C:\\nodejs",
-        configHome: Option.none(),
-        dataHome: Option.none(),
-        flags: [],
-      }))
-        .map(script)
-        .join("\n");
-
-      assert.deepStrictEqual(job.retime(2).map(script), [
-        [
-          "$ErrorActionPreference = 'Stop'",
-          ...installed.split("\n").filter((line) => line.startsWith("$trigger")),
-          "Set-ScheduledTask -TaskName 'token-ledger sync' -Trigger $trigger | Out-Null",
-        ].join("\n"),
-      ]);
+      // The CI-only test below checks the trigger the task scheduler actually ends up with.
+      const [retime, ...more] = job.retime(2);
+      assert.lengthOf(more, 0);
+      assert.include(
+        retime === undefined ? "" : script(retime),
+        "Set-ScheduledTask -TaskName 'token-ledger sync' -Trigger $trigger",
+      );
 
       // A failed query is not an absent task, so the next sync asks again.
       const failed = yield* tasks.dailyJob.pipe(

@@ -3,7 +3,6 @@ import { assert, it } from "@effect/vitest";
 import { Schema } from "effect";
 
 import { PriceBook, type Coverage } from "./model.ts";
-import { pricerFor } from "./pricing.ts";
 import {
   RepricePayload,
   type SyncBucket,
@@ -86,7 +85,7 @@ it("requires fully read history before coverage can authorize replacement", () =
 
 it("only builds payloads the server can store", () => {
   const buckets = sessionBuckets(
-    pricerFor(PriceBook.make({ status: "custom", fetchedAt: null, source: "fixture", prices: {} })),
+    PriceBook.make({ status: "custom", fetchedAt: null, source: "fixture", prices: {} }),
   );
 
   for (const model of ["model\0", "model\uFFFD", `model\uFFFD${"😀".repeat(600)}`])
@@ -200,22 +199,20 @@ it("only builds payloads the server can store", () => {
 
 it("prices each record at its own tier before summing the bucket", () => {
   const buckets = sessionBuckets(
-    pricerFor(
-      PriceBook.make({
-        status: "custom",
-        fetchedAt: null,
-        source: "fixture",
-        prices: {
-          tiered: {
-            input: 1,
-            output: 10,
-            cacheRead: 0.1,
-            cacheWrite: null,
-            tiers: [{ above: 272_000, input: 2, output: 15, cacheRead: 0.2, cacheWrite: null }],
-          },
+    PriceBook.make({
+      status: "custom",
+      fetchedAt: null,
+      source: "fixture",
+      prices: {
+        tiered: {
+          input: 1,
+          output: 10,
+          cacheRead: 0.1,
+          cacheWrite: null,
+          tiers: [{ above: 272_000, input: 2, output: 15, cacheRead: 0.2, cacheWrite: null }],
         },
-      }),
-    ),
+      },
+    }),
   );
 
   // Contexts of 272,000 and 272,001 tokens: the first stays at the base tier.
@@ -249,15 +246,13 @@ it("prices each record at its own tier before summing the bucket", () => {
 
 it("uploads the priced subtotal of a bucket that also has unpriced records", () => {
   const buckets = sessionBuckets(
-    pricerFor(
-      PriceBook.make({
-        status: "custom",
-        fetchedAt: null,
-        source: "fixture",
-        // Like OpenAI rates upstream: no cache-write price.
-        prices: { priced: { input: 1, output: 0, cacheRead: 0.1, cacheWrite: null } },
-      }),
-    ),
+    PriceBook.make({
+      status: "custom",
+      fetchedAt: null,
+      source: "fixture",
+      // Like OpenAI rates upstream: no cache-write price.
+      prices: { priced: { input: 1, output: 0, cacheRead: 0.1, cacheWrite: null } },
+    }),
   );
 
   const record = (id: string, model: string, cacheWrite: number) =>

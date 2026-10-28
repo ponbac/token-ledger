@@ -12,7 +12,7 @@ import {
   Tokens,
   type UsageRecord,
 } from "./model.ts";
-import { type Pricer, type UsageTotals, addUsage, priceRecord } from "./pricing.ts";
+import { type UsageTotals, addUsage, priceRecord } from "./pricing.ts";
 
 const hour = 3_600_000;
 
@@ -329,7 +329,7 @@ function sessionKey(provider: Provider, session: string): string {
  * rather than records. Each record is priced before it is summed, so its own context chooses its
  * tier. `finish` returns them in a stable order.
  */
-export function sessionBuckets(pricer: Pricer) {
+export function sessionBuckets(pricing: PriceBook) {
   const totals = new Map<
     string,
     {
@@ -357,7 +357,7 @@ export function sessionBuckets(pricer: Pricer) {
       ]);
 
       const previous = totals.get(key);
-      const cost = priceRecord(record, pricer).usd;
+      const cost = priceRecord(record, pricing).usd;
 
       totals.set(key, {
         record: previous?.record ?? record,

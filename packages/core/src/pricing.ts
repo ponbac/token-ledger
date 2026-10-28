@@ -369,17 +369,6 @@ export function configuredPricing(
   return PriceBook.make(basis === undefined ? book : { ...book, basis });
 }
 
-/** Everything `priceRecord` reads: vendor rates and GitHub Copilot's rate card. */
-export interface Pricer {
-  readonly vendor: PriceBook;
-  readonly copilot: CopilotRateCard;
-}
-
-/** Prices with `vendor` rates and the checked-in Copilot rate card. */
-export function pricerFor(vendor: PriceBook): Pricer {
-  return { vendor, copilot: copilotRates };
-}
-
 // Whether GitHub Copilot paid: Copilot's own requests unless routed elsewhere, and any routed to it.
 function copilotPaid(record: Pick<UsageRecord, "provider" | "billingProvider">): boolean {
   return record.billingProvider === undefined
@@ -416,15 +405,15 @@ function vendorLookup(book: PriceBook, model: string): ModelPrice | undefined {
  * Copilot-paid records take GitHub Copilot's card, then LiteLLM's `github_copilot/` rates for a
  * model the card lacks, then the vendor's. Everything else takes the vendor's.
  */
-function resolve(record: UsageRecord, pricer: Pricer): ModelPrice | undefined {
-  if (!copilotPaid(record)) return vendorLookup(pricer.vendor, record.model);
+function resolve(record: UsageRecord, vendor: PriceBook): ModelPrice | undefined {
+  if (!copilotPaid(record)) return vendorLookup(vendor, record.model);
   const bare = withoutVariant(record.model);
   const fallback = `github_copilot/${bare}`;
 
   return (
-    copilotPrice(pricer.copilot, bare, record.timestamp) ??
-    (Object.hasOwn(pricer.vendor.prices, fallback) ? pricer.vendor.prices[fallback] : undefined) ??
-    vendorLookup(pricer.vendor, record.model)
+    copilotPrice(copilotRates, bare, record.timestamp) ??
+    (Object.hasOwn(vendor.prices, fallback) ? vendor.prices[fallback] : undefined) ??
+    vendorLookup(vendor, record.model)
   );
 }
 
@@ -471,8 +460,8 @@ export interface RecordCost {
  * take the one-hour rate where there is one. A cache read or write the price has no rate for
  * leaves the record unpriced, never free.
  */
-export function priceRecord(record: UsageRecord, pricer: Pricer): RecordCost {
-  const price = resolve(record, pricer);
+export function priceRecord(record: UsageRecord, vendor: PriceBook): RecordCost {
+  const price = resolve(record, vendor);
 
   if (price === undefined) return { usd: null, base: null };
   const { input, cacheRead, cacheWrite, output } = record.tokens;

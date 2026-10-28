@@ -12,12 +12,9 @@ const hour = 3_600_000;
 const isProvider = Schema.is(Provider);
 
 /**
- * What a sync does about one provider's stored usage that an older pricing basis priced.
- * `Reprice` sends the provider's buckets in `range`, from the hour the server named (`from`)
- * up to the sync's window. `Skip` is a reprice already finished from the same hour on the same
- * basis by a sync whose window reached this one's start: everything from `from` up to this
- * window was sent on this basis, so the stored buckets left are ones this machine cannot
- * reproduce.
+ * What a sync does about one provider's stored usage that an older pricing basis priced:
+ * `Reprice` sends its buckets in `range`, and `Skip` leaves what a finished reprice covered.
+ * `from` is the hour the server named.
  */
 export type RepriceStep = Data.TaggedEnum<{
   Reprice: {
@@ -29,7 +26,6 @@ export type RepriceStep = Data.TaggedEnum<{
   Skip: { readonly provider: Provider; readonly from: number; readonly staleBuckets: number };
 }>;
 
-/** Constructors and matchers for `RepriceStep`. */
 export const RepriceStep = Data.taggedEnum<RepriceStep>();
 
 /** What `repricePlan` weighs besides the server's answer. */
@@ -49,9 +45,11 @@ export interface RepriceScope {
  * before its window. The window's own hours were just stored on the current basis. A step's
  * range starts at the server's `from`, never before its floor, on a whole hour. Providers the
  * server names but this client does not know, the sync left out, or with nothing stale before
- * the window get no step. A finished reprice skips the provider only while it covers the
- * hours up to this window: an earlier sync whose window ended before this one starts left
- * hours between them that it never sent.
+ * the window get no step. A reprice finished from the same `from` on the same basis skips the
+ * provider only while its window reached this one's start: then everything from `from` up to
+ * this window was sent on this basis, so the stale buckets left are ones this machine cannot
+ * reproduce. An earlier sync whose window ended before this one starts left hours between them
+ * that it never sent.
  */
 export function repricePlan(status: RepricingStatus, scope: RepriceScope): RepriceStep[] {
   const floor = DateTime.toEpochMillis(status.floor);
@@ -91,14 +89,9 @@ export function repricePlan(status: RepricingStatus, scope: RepriceScope): Repri
 }
 
 /**
- * What happened to stored usage on an older pricing basis after a sync. `Unanswered`: the
- * server could not say what to reprice, and nothing was sent. `Repriced`: every bucket the
- * machine could build for the provider from `from` on was sent; the counts are the server's.
- * `Skipped`: see `RepriceStep`. `NoHistory`: the machine found none of the provider's history,
- * so it sent nothing and remembers nothing; missing history is not pruned history, and the
- * next sync looks again. `Failed`: not finished, so the next sync tries again; the counts
- * cover the requests the server accepted. `Unremembered`: finished reprices could not be
- * saved, so the next sync sends them again.
+ * What happened to stored usage on an older pricing basis after a sync. `Repriced` counts are
+ * the server's; `Failed` counts cover the requests it accepted before the failure.
+ * `Unremembered`: finished reprices could not be saved.
  */
 export type RepriceOutcome = Data.TaggedEnum<{
   Unanswered: { readonly message: string };
@@ -127,7 +120,6 @@ export type RepriceOutcome = Data.TaggedEnum<{
   Unremembered: { readonly message: string };
 }>;
 
-/** Constructors and matchers for `RepriceOutcome`. */
 export const RepriceOutcome = Data.taggedEnum<RepriceOutcome>();
 
 /** A sync that stored its window on a pricing basis, and how to rebuild older buckets. */
@@ -216,14 +208,9 @@ const repriceProvider = Effect.fn("Sync.repriceProvider")(function* (
 
 /**
  * After a sync stored its window, reprices the machine's older stored usage that another
- * pricing basis priced, one provider at a time: it asks the server where each provider's stale
- * usage starts, rebuilds that provider's buckets from there up to the window, and sends them in
- * requests of at most 20,000 buckets. A sync without a basis claims none, so it reprices
- * nothing and asks nothing. Finished reprices are remembered per server and provider with the
- * end of the sync's window, and a provider the server names again from the same hour on the
- * same basis, for a window starting by that end, is skipped. A provider whose history the
- * machine cannot find is reported and not remembered. Never fails: every problem becomes an
- * outcome to report, and the next sync tries again.
+ * pricing basis priced, one provider at a time, as `repricePlan` decides. A sync without a
+ * basis claims none, so it reprices nothing and asks nothing. Never fails: every problem
+ * becomes an outcome to report, and the next sync tries again.
  */
 export const repriceStoredUsage = Effect.fn("Sync.repriceStoredUsage")(function* (run: RepriceRun) {
   const basis = run.payload.pricing.basis;
