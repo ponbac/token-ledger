@@ -15,6 +15,8 @@ export interface ParseResult {
   /** Records that are originals or copies depending on files read later; classified at the end. */
   readonly deferred: readonly UsageRecord[];
   readonly hints: readonly PlanHint[];
+  /** IDs of requests that are not usage to count, so no other source's copy is counted either. */
+  readonly excluded: readonly string[];
   readonly malformed: number;
   readonly skipped: number;
   readonly warnings: readonly string[];
@@ -32,6 +34,7 @@ export const empty: ParseResult = {
   inherited: [],
   deferred: [],
   hints: [],
+  excluded: [],
   malformed: 0,
   skipped: 0,
   warnings: [],

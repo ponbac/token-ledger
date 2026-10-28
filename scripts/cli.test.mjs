@@ -1129,6 +1129,37 @@ await test("copilot enable sets the export up once, and reports then read both e
 
     writeFileSync(elsewhere, inference("elsewhere"));
     assert.deepEqual(read(elsewhere), { records: 1, sources: [[elsewhere, "ok", 1]] });
+
+    // Copilot CLI and VS Code's Copilot harness keep session logs, read without setup. A
+    // request the export holds too counts once.
+    const sessions = join(directory, ".copilot", "session-state");
+
+    /** @param {string} apiCallId */
+    const usage = (apiCallId) =>
+      JSON.stringify({
+        type: "session.usage_record",
+        timestamp: "2026-09-22T10:00:00.000Z",
+        data: {
+          usage: { model: "fixture-model", inputTokens: 100, outputTokens: 20, apiCallId },
+        },
+      });
+
+    mkdirSync(join(sessions, "harness"), { recursive: true });
+    writeFileSync(
+      join(sessions, "harness", "events.jsonl"),
+      [
+        JSON.stringify({ type: "session.start", data: { sessionId: "harness" } }),
+        usage("harness-1"),
+        usage("chat-1"),
+      ].join("\n"),
+    );
+    assert.deepEqual(read(join(exports, "usage.jsonl")), {
+      records: 4,
+      sources: [
+        [sessions, "ok", 1],
+        [exports, "ok", 2],
+      ],
+    });
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

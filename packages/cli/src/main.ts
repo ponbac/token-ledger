@@ -193,6 +193,8 @@ const usageRequest = Effect.fn("CLI.usageRequest")(function* (
 
   const copilotFile = yield* Config.String("COPILOT_OTEL_FILE_EXPORTER_PATH").pipe(Config.option);
 
+  const copilotSessions = path.join(expand(copilotHome), "session-state");
+
   const piHome = yield* Config.String("PI_CODING_AGENT_DIR").pipe(
     Config.withDefault(path.join(home, ".pi", "agent")),
   );
@@ -219,6 +221,12 @@ const usageRequest = Effect.fn("CLI.usageRequest")(function* (
     { provider: "codex", path: path.join(expand(codexHome), "archived_sessions") },
     { provider: "claude", path: path.join(expand(claudeHome), "projects") },
     { provider: "grok", path: path.join(expand(grokHome), "sessions") },
+    // Session logs first: where a telemetry export holds the same request, the session's copy,
+    // which names its workspace, is the one counted. Only Copilot CLI and VS Code's Copilot
+    // harness keep them, so a machine without the folder reads only the export, as before.
+    ...((yield* fs.exists(copilotSessions))
+      ? [{ provider: "copilot", path: copilotSessions } satisfies Source]
+      : []),
     ...(yield* copilotSources(
       path.join(expand(copilotHome), "otel"),
       Option.map(copilotFile, (value) => expand(value)),

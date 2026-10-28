@@ -17,6 +17,7 @@ export const CopilotAttributes = Schema.Struct({
   "gen_ai.usage.cache_creation.input_tokens": Schema.optionalKey(Schema.Natural),
   "gen_ai.usage.cache_read_input_tokens": Schema.optionalKey(Schema.Natural),
   "gen_ai.usage.cache_creation_input_tokens": Schema.optionalKey(Schema.Natural),
+  "gen_ai.usage.cache_write.input_tokens": Schema.optionalKey(Schema.Natural),
   "github.copilot.git.repository": Schema.optionalKey(Schema.String),
   "copilot_chat.repo.remote_url": Schema.optionalKey(Schema.String),
   "session.id": Schema.optionalKey(Schema.String),
@@ -68,11 +69,15 @@ interface Candidate {
   readonly hinted?: UsageRecord["repository"];
 }
 
+/** Whether Copilot named a GitHub repository as `owner/name`, its identity on GitHub. */
+export const isOwnerAndName = (repository: string) =>
+  /^[A-Za-z0-9-]+\/(?!\.{1,2}$)[A-Za-z0-9_.-]+$/.test(repository);
+
 function repositoryReference(attributes: typeof CopilotAttributes.Type): UsageRecord["repository"] {
   const repository = attributes["github.copilot.git.repository"];
 
   if (repository !== undefined)
-    return /^[A-Za-z0-9-]+\/(?!\.{1,2}$)[A-Za-z0-9_.-]+$/.test(repository)
+    return isOwnerAndName(repository)
       ? RepositoryReference.Identity({ value: repository })
       : RepositoryReference.Remote({ value: repository });
 
@@ -152,9 +157,11 @@ export function copilotParser(
       const cacheRead =
         a["gen_ai.usage.cache_read.input_tokens"] ?? a["gen_ai.usage.cache_read_input_tokens"] ?? 0;
 
+      // The Copilot harness's Agent Host export names cache writes `cache_write`.
       const cacheWrite =
         a["gen_ai.usage.cache_creation.input_tokens"] ??
         a["gen_ai.usage.cache_creation_input_tokens"] ??
+        a["gen_ai.usage.cache_write.input_tokens"] ??
         0;
 
       if (cacheRead + cacheWrite > input) return skipped;
@@ -192,29 +199,123 @@ export function copilotParser(
         if (!isSpan && spanKey !== undefined && responseId !== undefined)
           eventResponses.set(spanKey, (eventResponses.get(spanKey) ?? new Set()).add(responseId));
 
-      const identified = candidates.map((candidate): Candidate => {
+      // The ID each request goes by, a span taking its event's as above.
+      const responses = candidates.map((candidate) => {
         const shared =
           candidate.isSpan && candidate.responseId === undefined && candidate.spanKey !== undefined
             ? eventResponses.get(candidate.spanKey)
             : undefined;
 
-        const responseId = shared?.size === 1 ? [...shared][0] : candidate.responseId;
+        return shared?.size === 1 ? [...shared][0] : candidate.responseId;
+      });
 
-        if (responseId === undefined) return candidate;
-        const record = { ...candidate.record, id: `response:${responseId}` };
+      // VS Code's Local harness gives every request of a turn the turn's response ID. Request
+      // spans sharing an ID are separate requests, counted by their own span keys. Each event
+      // sharing it pairs with one of those spans, by span key or by the same token counts within
+      // a second, and is left to it; an event no span accounts for counts by when it ended and
+      // what it used, so a repeated line still counts once.
+      const observed = ({ timestamp, tokens }: UsageRecord) =>
+        `${timestamp}:${tokens.input}:${tokens.output}`;
+
+      const promptTokens = ({ tokens }: UsageRecord) =>
+        tokens.input + tokens.cacheRead + tokens.cacheWrite;
+
+      const requests = new Map<string, { spans: number[]; events: number[] }>();
+
+      candidates.forEach((candidate, index) => {
+        const responseId = responses[index];
+
+        if (responseId === undefined) return;
+        const request = requests.get(responseId) ?? { spans: [], events: [] };
+        (candidate.isSpan ? request.spans : request.events).push(index);
+        requests.set(responseId, request);
+      });
+
+      const reused = new Set<string>();
+      // Each event left to a span, by index, with the span that accounts for it.
+      const paired = new Map<number, number>();
+
+      for (const [responseId, { spans, events }] of requests) {
+        const spanKeys = new Set(spans.map((index) => candidates[index]?.spanKey));
+
+        const usages = new Set(
+          events.flatMap((index) => candidates[index]?.record ?? []).map(observed),
+        );
+
+        if (spanKeys.size <= 1 && usages.size <= 1) continue;
+        reused.add(responseId);
+        const unpaired = [...spans];
+        // A repeated event line follows its first copy, so one request pairs once.
+        const settled = new Map<string, number | undefined>();
+
+        for (const index of events) {
+          const event = candidates[index];
+
+          if (event === undefined) continue;
+          const usage = observed(event.record);
+
+          if (!settled.has(usage)) {
+            const match = unpaired.findIndex((spanIndex) => {
+              const span = candidates[spanIndex];
+
+              return (
+                span !== undefined &&
+                ((event.spanKey !== undefined && event.spanKey === span.spanKey) ||
+                  (promptTokens(event.record) === promptTokens(span.record) &&
+                    event.record.tokens.output === span.record.tokens.output &&
+                    Math.abs(event.record.timestamp - span.record.timestamp) <= 1000))
+              );
+            });
+
+            settled.set(usage, match === -1 ? undefined : unpaired.splice(match, 1)[0]);
+          }
+
+          const span = settled.get(usage);
+
+          if (span !== undefined) paired.set(index, span);
+        }
+      }
+
+      // A span takes the repository its paired event names when it names none.
+      const pairedRepositories = new Map<number, RepositoryReference>();
+
+      for (const [event, span] of paired) {
+        const repository = candidates[event]?.record.repository;
+
+        if (repository) pairedRepositories.set(span, repository);
+      }
+
+      const identified = candidates.flatMap((candidate, index): Candidate[] => {
+        const responseId = responses[index];
+
+        if (responseId === undefined) return [candidate];
+
+        if (paired.has(index)) return [];
+
+        const repository = candidate.record.repository ?? pairedRepositories.get(index) ?? null;
+
+        const id = !reused.has(responseId)
+          ? `response:${responseId}`
+          : candidate.isSpan
+            ? candidate.record.id
+            : `response:${responseId}@${observed(candidate.record)}`;
+
+        const record = { ...candidate.record, id, repository };
         const routed = chatgptRequests.get(responseId);
 
-        if (routed === undefined) return { ...candidate, responseId, record };
+        if (routed === undefined) return [{ ...candidate, responseId, record }];
 
-        return {
-          ...candidate,
-          responseId,
-          record: { ...record, billingProvider: "codex" },
-          hinted:
-            routed.repository === null
-              ? null
-              : RepositoryReference.Remote({ value: routed.repository }),
-        };
+        return [
+          {
+            ...candidate,
+            responseId,
+            record: { ...record, billingProvider: "codex" },
+            hinted:
+              routed.repository === null
+                ? null
+                : RepositoryReference.Remote({ value: routed.repository }),
+          },
+        ];
       });
 
       const preferred = new Map<string, Candidate>();

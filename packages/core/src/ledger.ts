@@ -35,6 +35,11 @@ import { claudeParser } from "./providers/claude.ts";
 import { codexParser } from "./providers/codex.ts";
 import { copilotDatabaseLines, type CopilotDatabaseError } from "./providers/copilot-db.ts";
 import { copilotParser } from "./providers/copilot.ts";
+import {
+  copilotSessionParser,
+  insideSession,
+  isSessionEvents,
+} from "./providers/copilot-session.ts";
 import { grokParser } from "./providers/grok.ts";
 import {
   type OpencodeDatabaseError,
@@ -256,6 +261,8 @@ export class Ledger extends Context.Service<
 
             for (const warning of result.warnings) warnings.add(warning);
 
+            for (const id of result.excluded) seen.add(`${source.provider}:${id}`);
+
             for (const hint of result.hints) {
               if (locate(hint.timestamp) !== undefined)
                 notice?.({ provider: source.provider, ...hint });
@@ -323,7 +330,11 @@ export class Ledger extends Context.Service<
               Match.when("codex", () => codexParser(canonical)),
               Match.when("claude", () => claudeParser(canonical)),
               Match.when("grok", () => grokParser(canonical)),
-              Match.when("copilot", () => copilot ?? copilotParser(canonical)),
+              Match.when("copilot", () =>
+                isSessionEvents(file)
+                  ? copilotSessionParser(canonical, chatgptRequests)
+                  : (copilot ?? copilotParser(canonical)),
+              ),
               Match.when("pi", () => piParser(canonical)),
               Match.when("opencode", () => opencode.parser(opencodeFile(path, canonical))),
               Match.exhaustive,
@@ -358,8 +369,7 @@ export class Ledger extends Context.Service<
               ),
             );
 
-            if (copilot === undefined && parser.finish !== undefined)
-              yield* accept(parser.finish());
+            if (parser !== copilot && parser.finish !== undefined) yield* accept(parser.finish());
           });
 
           const pending = [source.path];
@@ -655,7 +665,13 @@ function acceptsFile(path: Path.Path, source: Source, file: string): boolean {
       opencodeFile(path, file) !== "database" || opencodeDatabaseName.test(path.basename(file))
     );
 
-  return file.endsWith(".jsonl") || (source.provider === "copilot" && file.endsWith(".db"));
+  // A session's folder holds its event log beside files the session wrote.
+  if (source.provider === "copilot")
+    return insideSession(file)
+      ? isSessionEvents(file)
+      : file.endsWith(".jsonl") || file.endsWith(".db");
+
+  return file.endsWith(".jsonl");
 }
 
 /**
@@ -694,21 +710,22 @@ const opencodeElsewhere = new Set([
 
 /** Whether a directory under a source can hold its history. */
 function descends(path: Path.Path, source: Source, directory: string): boolean {
-  return (
-    source.provider !== "opencode" ||
-    directory === source.path ||
-    !opencodeElsewhere.has(path.basename(directory))
-  );
+  if (directory === source.path) return true;
+
+  if (source.provider === "copilot") return !insideSession(directory);
+
+  return source.provider !== "opencode" || !opencodeElsewhere.has(path.basename(directory));
 }
 
 /**
  * Whether a file found under a source directory was last modified before `cutoff`, and so holds
- * no later usage. A file named as the source itself is always read. So is every Copilot file: a
+ * no later usage. A file named as the source itself is always read. So is every Copilot export: a
  * request takes its repository and cache details from spans in other files, and a live SQLite
  * database keeps new rows in its write-ahead log without touching its own modification time,
- * as OpenCode's databases do. OpenCode's legacy session files are small and always read, since
- * a fork's copies are known by when their session began; its message files are rewritten only
- * while their request runs.
+ * as OpenCode's databases do. A Copilot session's event log stands alone and is only appended
+ * to, so it settles like any other. OpenCode's legacy session files are small and always read,
+ * since a fork's copies are known by when their session began; its message files are rewritten
+ * only while their request runs.
  */
 function settledBefore(
   path: Path.Path,
@@ -719,7 +736,7 @@ function settledBefore(
 ): boolean {
   if (
     source.path === file ||
-    source.provider === "copilot" ||
+    (source.provider === "copilot" && !isSessionEvents(file)) ||
     (source.provider === "opencode" && opencodeFile(path, file) !== "message")
   )
     return false;
