@@ -162,10 +162,9 @@ export const saveSyncSettings = Effect.fn("Settings.saveSync")(function* (
 
 /**
  * A reprice this installation finished: it sent `server`, an origin, every bucket of
- * `provider` it could build from `from` up to its sync's window, priced on `basis`, and that
- * sync uploaded the window, which ends at `coveredUntil`. `from` is the hour the server named,
- * so the same answer on the same basis later, for a window starting by `coveredUntil`, means
- * only buckets this machine cannot reproduce are left.
+ * `provider` it could build from `from`, the hour the server named, up to its sync's window,
+ * priced on `basis`; that sync uploaded the window, which ends at `coveredUntil`. A missing
+ * or failed reprice is never saved, so the next sync tries it again.
  */
 export const CompletedReprice = Schema.Struct({
   server: Schema.String,
@@ -230,6 +229,43 @@ export const saveRepricing = Effect.fn("Settings.saveRepricing")(function* (
     // Sync output names no local paths beyond the settings directory's own files.
     Effect.mapError(
       () => new SettingsError({ message: "Cannot save repricing.json in the settings directory." }),
+    ),
+  );
+});
+
+/**
+ * `schedule.json` records that this installation's schedule is the user's choice: `schedule
+ * install` set it, or a sync already moved a once-a-day job from before `--every` to the
+ * default interval. Either way, no sync changes the schedule again.
+ */
+const ScheduleSettings = Schema.Struct({ version: Schema.Literal(1) });
+
+/** Whether `schedule.json` holds a valid record; a missing or unreadable one holds none. */
+export const scheduleSettled = Effect.fn("Settings.scheduleSettled")(function* (directory: string) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+
+  return yield* fs.readFileString(path.join(directory, "schedule.json")).pipe(
+    Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(ScheduleSettings))),
+    Effect.as(true),
+    Effect.orElseSucceed(() => false),
+  );
+});
+
+/** Writes `schedule.json`, so that no sync changes the schedule again. */
+export const settleSchedule = Effect.fn("Settings.settleSchedule")(function* (directory: string) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+
+  yield* fs.makeDirectory(directory, { recursive: true }).pipe(
+    Effect.andThen(
+      fs.writeFileString(
+        path.join(directory, "schedule.json"),
+        `${JSON.stringify({ version: 1 }, null, 2)}\n`,
+      ),
+    ),
+    Effect.mapError(
+      () => new SettingsError({ message: "Cannot save schedule.json in the settings directory." }),
     ),
   );
 });

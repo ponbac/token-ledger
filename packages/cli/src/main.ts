@@ -47,11 +47,13 @@ import { csv, repriceLine, syncSummary, table, unpricedModels } from "./format.t
 import { repriceStoredUsage } from "./reprice.ts";
 import {
   TimeOfDay,
+  defaultInterval,
   describe,
   describeTimes,
   hostScheduler,
   intervals,
   perform,
+  retimeDailySchedule,
 } from "./schedule.ts";
 import {
   ServerUrl,
@@ -60,6 +62,7 @@ import {
   loadSyncSettings,
   saveSyncSettings,
   settingsDirectory,
+  settleSchedule,
 } from "./settings.ts";
 import { hasUploaded, upload } from "./upload.ts";
 
@@ -523,6 +526,23 @@ const sync = Command.make(
       return;
     }
 
+    // Before the upload, which can end the sync early. Failing leaves the sync's outcome alone.
+    yield* retimeDailySchedule(directory).pipe(
+      Effect.matchEffect({
+        onSuccess: Option.match({
+          onNone: () => Effect.void,
+          onSome: (retimed) =>
+            Console.log(
+              `Moved the scheduled sync from once a day at ${retimed.at} to ${describeTimes(retimed)}, as a ${retimed.scheduler}. To keep a daily sync, run token-ledger schedule install --every 24h.`,
+            ),
+        }),
+        onFailure: (error) =>
+          Console.error(
+            `Cannot move the once-a-day scheduled sync to every ${defaultInterval} hours: ${error.message} Run token-ledger schedule install to replace it.`,
+          ),
+      }),
+    );
+
     const refused = Effect.gen(function* () {
       yield* Console.error("Not syncing: coverage is incomplete or usage is unpriced (--strict).");
       process.exitCode = 2;
@@ -715,8 +735,8 @@ const scheduleInstall = Command.make(
   "install",
   {
     every: Flag.ChoiceWithValue("every", intervals).pipe(
-      Flag.withDefault(2),
-      Flag.withDescription("Time between syncs; defaults to 2h"),
+      Flag.withDefault(defaultInterval),
+      Flag.withDescription(`Time between syncs; defaults to ${defaultInterval}h`),
     ),
     at: Flag.String("at").pipe(
       Flag.withDefault("12:30"),
@@ -787,6 +807,9 @@ const scheduleInstall = Command.make(
       });
 
     yield* perform(actions);
+
+    // A chosen schedule, even a daily one, is never moved by a later sync.
+    yield* settleSchedule(directory).pipe(Effect.ignore);
 
     yield* Console.log(
       `Scheduled a sync ${describeTimes(flags)} as a ${scheduler.name}, replacing any earlier schedule. Inspect it with token-ledger schedule status.`,

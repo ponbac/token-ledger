@@ -29,7 +29,7 @@ import {
   type Source,
   type UsageRecord,
 } from "./model.ts";
-import { addUsage, priceRecord, pricerFor } from "./pricing.ts";
+import { addUsage, priceRecord } from "./pricing.ts";
 import { type Attribution, projectResolver } from "./projects.ts";
 import { claudeParser } from "./providers/claude.ts";
 import { codexParser } from "./providers/codex.ts";
@@ -453,13 +453,12 @@ export class Ledger extends Context.Service<
         const request = yield* decode(input);
         const window = dayWindow(request.since, request.until, request.timeZone);
         const rows = new Map<string, ReportRow>();
-        const pricer = pricerFor(request.pricing);
 
         // No billing hints are read here, so a Copilot request routed to a ChatGPT plan is
         // priced as Copilot-paid, with Copilot's rate card.
         const coverage = yield* scan(request, window, window.dayOf, (record, { project }, day) => {
           const key = JSON.stringify([project, day, record.provider, record.model]);
-          const { usd, base } = priceRecord(record, pricer);
+          const { usd, base } = priceRecord(record, request.pricing);
 
           rows.set(key, {
             project,
@@ -511,7 +510,7 @@ export class Ledger extends Context.Service<
         const requested = hourRange(dayWindow(request.since, request.until, request.timeZone));
         // A history opens every file however old, and its window is settled afterwards.
         const from = history ? Math.min(historyFloor, requested.start) : requested.start;
-        const buckets = sessionBuckets(pricerFor(request.pricing));
+        const buckets = sessionBuckets(request.pricing);
         const hints = planHints();
         let earliest = requested.start;
         // Taken before reading, so the payload holds every record written before it. The server
@@ -589,7 +588,7 @@ export class Ledger extends Context.Service<
         if (hours.start !== range.start || hours.end !== range.end || range.start >= range.end)
           return yield* new InvalidRequest({ message: "Expected a range of whole UTC hours." });
 
-        const buckets = sessionBuckets(pricerFor(request.pricing));
+        const buckets = sessionBuckets(request.pricing);
 
         const coverage = yield* scan(
           { ...request, sources: request.sources.filter((source) => source.provider === provider) },

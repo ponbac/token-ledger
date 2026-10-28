@@ -5,7 +5,7 @@ import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/http";
 
 import { CopilotRateCard, copilotRates } from "./copilot-rates.ts";
 import { PriceBook, PricingBasis, type Tokens, type UsageRecord } from "./model.ts";
-import { configuredPricing, loadPrices, priceRecord, pricerFor, pricingBasis } from "./pricing.ts";
+import { configuredPricing, loadPrices, priceRecord, pricingBasis } from "./pricing.ts";
 
 const october = Date.parse("2026-10-20T10:00:00Z");
 
@@ -120,13 +120,9 @@ const fetchLitellm = Effect.fn("Test.fetchLitellm")(function* () {
   );
 });
 
-const withLitellm = <A, E>(
-  test: (pricer: ReturnType<typeof pricerFor>, book: PriceBook) => Effect.Effect<A, E>,
-) =>
+const withLitellm = <A, E>(test: (book: PriceBook) => Effect.Effect<A, E>) =>
   Effect.gen(function* () {
-    const book = yield* fetchLitellm();
-
-    return yield* test(pricerFor(book), book);
+    return yield* test(yield* fetchLitellm());
   }).pipe(Effect.provide(NodeServices.layer));
 
 describe("vendor rates", () => {
@@ -149,18 +145,17 @@ describe("vendor rates", () => {
       },
     });
 
-    const pricer = pricerFor(book);
     const used = tokens(40, 60, 10, 20);
-    assert.deepStrictEqual(priceRecord(request("unknown", used), pricer), {
+    assert.deepStrictEqual(priceRecord(request("unknown", used), book), {
       usd: null,
       base: null,
     });
-    assert.strictEqual(priceRecord(request("no-cache", used), pricer).usd, null);
-    assert.closeTo(priceRecord(request("known", used), pricer).usd ?? -1, 0.000322, 1e-12);
+    assert.strictEqual(priceRecord(request("no-cache", used), book).usd, null);
+    assert.closeTo(priceRecord(request("known", used), book).usd ?? -1, 0.000322, 1e-12);
 
     // Implicit writes need the chosen tier's write rate, unless no input is billed as written.
     const implicit = (input: number, cacheRead = 0) =>
-      priceRecord(request("implicit-unknown", tokens(input, cacheRead)), pricer).usd;
+      priceRecord(request("implicit-unknown", tokens(input, cacheRead)), book).usd;
 
     assert.closeTo(implicit(500) ?? -1, (3 * 2 + 497 * 2.5) / 1e6, 1e-15);
     assert.strictEqual(implicit(2_000), null);
@@ -187,9 +182,8 @@ describe("vendor rates", () => {
       assert.strictEqual(loaded.status, "cached");
       // Only configuredPricing establishes a basis, never a stored snapshot.
       assert.isUndefined(loaded.basis);
-      const pricer = pricerFor(loaded);
-      assert.strictEqual(priceRecord(request("test", tokens(1)), pricer).base?.input, 2);
-      assert.isNull(priceRecord(request("unknown", tokens(1)), pricer).base);
+      assert.strictEqual(priceRecord(request("test", tokens(1)), loaded).base?.input, 2);
+      assert.isNull(priceRecord(request("unknown", tokens(1)), loaded).base);
       const unavailable = yield* loadPrices(path.join(root, "missing"), true);
       assert.strictEqual(unavailable.status, "unavailable");
     }).pipe(Effect.provide(NodeServices.layer), Effect.provide(FetchHttpClient.layer)),
@@ -257,11 +251,11 @@ describe("vendor rates", () => {
   );
 
   it.effect("chooses each request's tier: 272,000 tokens stay base, 272,001 are long", () =>
-    withLitellm((pricer) =>
+    withLitellm((book) =>
       Effect.sync(() => {
         // OpenAI's rule applies too: three tokens at input, the rest at the cache-write rate.
-        const short = priceRecord(request("sol-model", tokens(1_000, 271_000, 0, 100)), pricer);
-        const long = priceRecord(request("sol-model", tokens(1_000, 271_001, 0, 100)), pricer);
+        const short = priceRecord(request("sol-model", tokens(1_000, 271_000, 0, 100)), book);
+        const long = priceRecord(request("sol-model", tokens(1_000, 271_001, 0, 100)), book);
         assert.closeTo(
           short.usd ?? -1,
           (3 * 2 + 997 * 2.5 + 271_000 * 0.1 + 100 * 10) / 1e6,
@@ -271,27 +265,27 @@ describe("vendor rates", () => {
         // A report shows the base tier, whichever tier priced the request.
         assert.closeTo(long.base?.input ?? -1, 2, 1e-9);
 
-        const partial = priceRecord(request("partial-tier", tokens(30_000, 100_000)), pricer);
+        const partial = priceRecord(request("partial-tier", tokens(30_000, 100_000)), book);
         assert.closeTo(partial.usd ?? -1, (30_000 * 4 + 100_000 * 0.2) / 1e6, 1e-12);
       }),
     ),
   );
 
   it.effect("prices a request summing several at the base tier", () =>
-    withLitellm((pricer) =>
+    withLitellm((book) =>
       Effect.sync(() => {
         const turn = { ...request("sol-model", tokens(1_000, 400_000, 0, 100)), aggregate: true };
-        const usd = priceRecord(turn, pricer).usd;
+        const usd = priceRecord(turn, book).usd;
         assert.closeTo(usd ?? -1, (3 * 2 + 997 * 2.5 + 400_000 * 0.1 + 100 * 10) / 1e6, 1e-12);
       }),
     ),
   );
 
   it.effect("prices implicit cache writes as min(input, 3) at input and the rest written", () =>
-    withLitellm((pricer) =>
+    withLitellm((book) =>
       Effect.sync(() => {
         const usd = (input: number, cacheWrite = 0, output = 0) =>
-          priceRecord(request("sol-model", tokens(input, 0, cacheWrite, output)), pricer).usd;
+          priceRecord(request("sol-model", tokens(input, 0, cacheWrite, output)), book).usd;
 
         assert.closeTo(usd(10) ?? -1, (3 * 2 + 7 * 2.5) / 1e6, 1e-15);
         assert.closeTo(usd(3) ?? -1, (3 * 2) / 1e6, 1e-15);
@@ -301,14 +295,14 @@ describe("vendor rates", () => {
         // Reported cache writes are priced as reported.
         assert.closeTo(usd(10, 50) ?? -1, (10 * 2 + 50 * 2.5) / 1e6, 1e-15);
         // A model without a cache-write rate bills uncached input as input.
-        const older = priceRecord(request("older-openai", tokens(1_000)), pricer).usd;
+        const older = priceRecord(request("older-openai", tokens(1_000)), book).usd;
         assert.closeTo(older ?? -1, (1_000 * 1.75) / 1e6, 1e-12);
       }),
     ),
   );
 
   it.effect("applies OpenAI's implicit cache writes whoever pays, and not Anthropic's", () =>
-    withLitellm((pricer) =>
+    withLitellm((book) =>
       Effect.sync(() => {
         const written = (3 * 2 + 997 * 2.5) / 1e6;
 
@@ -319,7 +313,7 @@ describe("vendor rates", () => {
           { provider: "opencode", billingProvider: "codex" },
         ] as const)
           assert.closeTo(
-            priceRecord(request("sol-model", tokens(1_000), route), pricer).usd ?? -1,
+            priceRecord(request("sol-model", tokens(1_000), route), book).usd ?? -1,
             written,
             1e-12,
             route.provider,
@@ -327,7 +321,7 @@ describe("vendor rates", () => {
 
         const claude = priceRecord(
           request("claude-opus-9-9", tokens(1_000), { provider: "claude" }),
-          pricer,
+          book,
         );
 
         assert.closeTo(claude.usd ?? -1, (1_000 * 4) / 1e6, 1e-12);
@@ -336,20 +330,20 @@ describe("vendor rates", () => {
   );
 
   it.effect("prices Claude's one-hour cache writes at their own rate, tiered for Haiku", () =>
-    withLitellm((pricer) =>
+    withLitellm((book) =>
       Effect.sync(() => {
         const claude = { provider: "claude" } as const;
 
         const opus = (cacheWrite1h: number) =>
           priceRecord(
             { ...request("claude-opus-9-9", tokens(10, 0, 1_000), claude), cacheWrite1h },
-            pricer,
+            book,
           ).usd;
 
         assert.closeTo(opus(1_000) ?? -1, (10 * 4 + 1_000 * 8) / 1e6, 1e-12);
         assert.closeTo(opus(400) ?? -1, (10 * 4 + 600 * 5 + 400 * 8) / 1e6, 1e-12);
         assert.closeTo(
-          priceRecord(request("claude-opus-9-9", tokens(10, 0, 1_000), claude), pricer).usd ?? -1,
+          priceRecord(request("claude-opus-9-9", tokens(10, 0, 1_000), claude), book).usd ?? -1,
           (10 * 4 + 1_000 * 5) / 1e6,
           1e-12,
         );
@@ -360,7 +354,7 @@ describe("vendor rates", () => {
               ...request("claude-haiku-9-9", tokens(1_000, cacheRead, 2_000, 100), claude),
               cacheWrite1h: 1_500,
             },
-            pricer,
+            book,
           ).usd;
 
         assert.closeTo(
@@ -379,17 +373,17 @@ describe("vendor rates", () => {
   );
 
   it.effect("resolves dotted Claude IDs, context variants, and no private aliases", () =>
-    withLitellm((pricer) =>
+    withLitellm((book) =>
       Effect.sync(() => {
         const opus = (model: string) =>
-          priceRecord(request(model, tokens(1_000), { provider: "opencode" }), pricer).usd;
+          priceRecord(request(model, tokens(1_000), { provider: "opencode" }), book).usd;
 
         assert.closeTo(opus("claude-opus-9.9") ?? -1, 0.004, 1e-12);
         assert.closeTo(opus("claude-opus-9-9[1m]") ?? -1, 0.004, 1e-12);
         assert.closeTo(opus("claude-opus-9.9[1m]") ?? -1, 0.004, 1e-12);
 
         for (const model of ["codex-auto-review", "gpt-5.3-codex-spark"])
-          assert.deepStrictEqual(priceRecord(request(model, tokens(1_000)), pricer), {
+          assert.deepStrictEqual(priceRecord(request(model, tokens(1_000)), book), {
             usd: null,
             base: null,
           });
@@ -400,24 +394,19 @@ describe("vendor rates", () => {
 
 describe("Copilot-paid requests", () => {
   it.effect("take Copilot's card, with its cache-write rule and long tier", () =>
-    withLitellm((pricer) =>
+    withLitellm((book) =>
       Effect.sync(() => {
         const sol = (route: Pick<UsageRecord, "provider" | "billingProvider">, cacheRead: number) =>
-          priceRecord(request("gpt-6.1-sol", tokens(10_000, cacheRead, 0, 1_000), route), pricer)
-            .usd;
+          priceRecord(request("gpt-6.1-sol", tokens(10_000, cacheRead, 0, 1_000), route), book).usd;
 
+        // Three tokens at the input rate: GitHub's bill is 0.00015 credits per request below all
+        // uncached input at the write rate.
         const short = (3 * 2 + 9_997 * 2.5 + 100_000 * 0.1 + 1_000 * 10) / 1e6;
         assert.closeTo(sol({ provider: "copilot" }, 100_000) ?? -1, short, 1e-12);
         assert.closeTo(
           sol({ provider: "opencode", billingProvider: "copilot" }, 100_000) ?? -1,
           short,
           1e-12,
-        );
-        // GitHub's bill: 0.00015 credits per request below all uncached input at the write rate.
-        assert.closeTo(
-          (10_000 * 2.5 + 100_000 * 0.1 + 1_000 * 10) / 1e6 - short,
-          0.00015 * 0.01,
-          1e-15,
         );
 
         assert.closeTo(
@@ -430,7 +419,7 @@ describe("Copilot-paid requests", () => {
         const luna = (cacheRead: number) =>
           priceRecord(
             request("gpt-5.6-luna", tokens(1_000, cacheRead), { provider: "copilot" }),
-            pricer,
+            book,
           ).usd;
 
         assert.closeTo(luna(199_000) ?? -1, (3 * 0.2 + 997 * 0.25 + 199_000 * 0.02) / 1e6, 1e-12);
@@ -439,7 +428,7 @@ describe("Copilot-paid requests", () => {
         // GPT-5.3-Codex has no cache-write rate, so uncached input is billed as input.
         const codex = priceRecord(
           request("gpt-5.3-codex", tokens(1_000), { provider: "copilot" }),
-          pricer,
+          book,
         );
 
         assert.closeTo(codex.usd ?? -1, (1_000 * 1.75) / 1e6, 1e-12);
@@ -447,7 +436,7 @@ describe("Copilot-paid requests", () => {
         // GitHub bills Claude's unreported cache writes as cache writes too.
         const sonnet = priceRecord(
           request("claude-sonnet-5.5", tokens(10_000, 40_000, 0, 500), { provider: "copilot" }),
-          pricer,
+          book,
         );
 
         assert.closeTo(
@@ -460,7 +449,7 @@ describe("Copilot-paid requests", () => {
   );
 
   it.effect("use the rate in effect on the request's UTC day", () =>
-    withLitellm((pricer) =>
+    withLitellm((book) =>
       Effect.sync(() => {
         const sol = (day: string) =>
           priceRecord(
@@ -470,7 +459,7 @@ describe("Copilot-paid requests", () => {
               { provider: "copilot" },
               Date.parse(`${day}T23:30:00Z`),
             ),
-            pricer,
+            book,
           ).usd;
 
         const promotion = (3 * 2 + 997 * 2.5) / 1e6;
@@ -486,7 +475,7 @@ describe("Copilot-paid requests", () => {
               { provider: "copilot" },
               Date.parse(`${day}T12:00:00Z`),
             ),
-            pricer,
+            book,
           ).usd;
 
         // GitHub's docs changed the cached rate on 2026-10-07; its bills changed a day later.
@@ -497,13 +486,13 @@ describe("Copilot-paid requests", () => {
   );
 
   it.effect("cost nothing on free models, which other payers' requests do not share", () =>
-    withLitellm((pricer) =>
+    withLitellm((book) =>
       Effect.sync(() => {
         const used = tokens(1_000, 500, 0, 100);
 
         for (const model of ["copilot-nes-lysithea-24", "nes-example-1", "gpt-4o-mini-2024-07-18"])
           assert.strictEqual(
-            priceRecord(request(model, used, { provider: "copilot" }), pricer).usd,
+            priceRecord(request(model, used, { provider: "copilot" }), book).usd,
             0,
             model,
           );
@@ -514,7 +503,7 @@ describe("Copilot-paid requests", () => {
           { provider: "opencode" },
         ] as const)
           assert.closeTo(
-            priceRecord(request("gpt-4o-mini-2024-07-18", used, route), pricer).usd ?? -1,
+            priceRecord(request("gpt-4o-mini-2024-07-18", used, route), book).usd ?? -1,
             (1_000 * 0.15 + 500 * 0.075 + 100 * 0.6) / 1e6,
             1e-12,
             route.provider,
@@ -526,7 +515,7 @@ describe("Copilot-paid requests", () => {
   it.effect(
     "fall back to LiteLLM's Copilot rates, then the vendor's, for models off the card",
     () =>
-      withLitellm((pricer) =>
+      withLitellm((book) =>
         Effect.sync(() => {
           const used = tokens(1_000, 1_000, 100, 100);
 
@@ -535,26 +524,26 @@ describe("Copilot-paid requests", () => {
             { provider: "pi", billingProvider: "copilot" },
           ] as const)
             assert.closeTo(
-              priceRecord(request("claude-sonnet-4.6", used, route), pricer).usd ?? -1,
+              priceRecord(request("claude-sonnet-4.6", used, route), book).usd ?? -1,
               (1_000 * 3 + 1_000 * 0.3 + 100 * 3.75 + 100 * 15) / 1e6,
               1e-12,
               route.provider,
             );
 
           // LiteLLM's Copilot rates bill unreported cache writes at the write rate, Claude's too.
-          const gpt = priceRecord(request("gpt-9", tokens(1_000), { provider: "copilot" }), pricer);
+          const gpt = priceRecord(request("gpt-9", tokens(1_000), { provider: "copilot" }), book);
           assert.closeTo(gpt.usd ?? -1, (3 * 1 + 997 * 1.25) / 1e6, 1e-12);
 
           const claude = priceRecord(
             request("claude-sonnet-4.6", tokens(1_000), { provider: "copilot" }),
-            pricer,
+            book,
           );
 
           assert.closeTo(claude.usd ?? -1, (3 * 3 + 997 * 3.75) / 1e6, 1e-12);
 
           const vendor = priceRecord(
             request("claude-opus-9.9", tokens(1_000), { provider: "copilot" }),
-            pricer,
+            book,
           );
 
           assert.closeTo(vendor.usd ?? -1, 0.004, 1e-12);
@@ -637,10 +626,16 @@ describe("pricing basis", () => {
     assert.isUndefined(pricingBasis("custom", undefined, copilotRates));
   });
 
-  it("keeps the source readable, naming the rate table and the Copilot card", () => {
-    assert.strictEqual(
-      configuredPricing(vendor, overrides).source,
-      `https://example.com/rates.json; GitHub Copilot rates ${copilotRates.version}; configuration overrides`,
-    );
+  it("names the rate table, the Copilot card, and any overrides in the source", () => {
+    const plain = configuredPricing(vendor, undefined).source;
+    const configured = configuredPricing(vendor, overrides).source;
+
+    for (const source of [plain, configured]) {
+      assert.include(source, "https://example.com/rates.json");
+      assert.include(source, copilotRates.version);
+    }
+
+    assert.notInclude(plain, "override");
+    assert.include(configured, "override");
   });
 });

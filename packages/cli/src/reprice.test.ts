@@ -479,7 +479,10 @@ describe("repriceStoredUsage", () => {
         Effect.forkChild,
       );
 
-      yield* TestClock.adjust("1 minute");
+      // The scan reads real files, so the retry's sleep can start after a single adjust.
+      yield* TestClock.adjust("1 minute").pipe(
+        Effect.repeat({ until: () => running.pollUnsafe() !== undefined }),
+      );
       const outcomes = yield* Fiber.join(running);
 
       const posts = server.exchanges.filter((exchange) => exchange.method === "POST");
