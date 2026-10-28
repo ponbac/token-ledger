@@ -3,7 +3,7 @@ import { homedir, userInfo } from "node:os";
 import { Data, Effect, FileSystem, Match, Option, Path, Schema } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
-import { configHome, settingsDirectory } from "./settings.ts";
+import { configHome, scheduleSettled, settingsDirectory, settleSchedule } from "./settings.ts";
 
 /** The OS scheduler could not be used, or a value cannot be written safely into its job. */
 export class ScheduleError extends Schema.TaggedError<ScheduleError>()("ScheduleError", {
@@ -33,6 +33,11 @@ export const intervals = [
 
 /** Hours between scheduled syncs. */
 export type Interval = (typeof intervals)[number][1];
+
+/** The interval `schedule install` uses, and that a once-a-day job from before it moves to. */
+export const defaultInterval: Interval = 2;
+
+const isTimeOfDay = Schema.is(TimeOfDay);
 
 /** What the scheduler runs, and when. Paths are absolute, and nothing here is a credential. */
 export interface ScheduledSync {
@@ -91,9 +96,25 @@ export type Action = Data.TaggedEnum<{
     /** Exit codes by which an `absent` command confirms the job is gone. */
     readonly gone: ReadonlyArray<number>;
   };
+  /** Starts a command in the background, unwaited, which outlives token-ledger. */
+  Launch: {
+    readonly program: string;
+    readonly args: ReadonlyArray<string>;
+    readonly shown: string;
+  };
 }>;
 
 const Action = Data.taggedEnum<Action>();
+
+/**
+ * An installed job that syncs once a day at `at`, as every job did before `--every`, and the
+ * actions that make it sync every `every` hours from `at` instead. They change only when the
+ * job runs, so it keeps its command, flags, and settings.
+ */
+export interface DailyJob {
+  readonly at: TimeOfDay;
+  readonly retime: (every: Interval) => ReadonlyArray<Action>;
+}
 
 /** A platform's scheduler, as the actions that install, remove, and inspect the scheduled sync. */
 export interface Scheduler {
@@ -104,6 +125,12 @@ export interface Scheduler {
   ) => Effect.Effect<ReadonlyArray<Action>, ScheduleError, never>;
   readonly uninstall: ReadonlyArray<Action>;
   readonly status: ReadonlyArray<Action>;
+  /** The installed job when it syncs once a day; none for no job or another interval. */
+  readonly dailyJob: Effect.Effect<
+    Option.Option<DailyJob>,
+    ScheduleError,
+    FileSystem.FileSystem | ChildProcessSpawner.ChildProcessSpawner
+  >;
 }
 
 const unit = "token-ledger-sync";
@@ -113,6 +140,20 @@ const label = "com.github.ponbac.token-ledger.sync";
 const task = "token-ledger sync";
 
 const packageSpec = "@ponbac/token-ledger@latest";
+
+/** The contents of a scheduler's job file, or none when it has no such file. */
+const readJob = (file: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+
+    return (yield* fs.exists(file))
+      ? Option.some(yield* fs.readFileString(file))
+      : Option.none<string>();
+  }).pipe(Effect.mapError(() => new ScheduleError({ message: `Cannot read ${file}.` })));
+
+/** A once-a-day time read from a job, when it is one. */
+const dailyAt = (hour: string, minute: string) =>
+  Option.filter(Option.some(`${hour.padStart(2, "0")}:${minute.padStart(2, "0")}`), isTimeOfDay);
 
 function run(outcome: Outcome, program: string, args: ReadonlyArray<string>, hint = "") {
   return Action.Run({
@@ -181,6 +222,20 @@ const systemdQuoted = (value: string) =>
     .replaceAll("%", "%%")
     .replaceAll("$", () => "$$")}"`;
 
+const timerUnit = (job: Pick<ScheduledSync, "at" | "every">) => `[Unit]
+Description=AI usage sync ${job.every === 24 ? "once a day" : `every ${job.every}h`}
+
+[Timer]
+OnCalendar=*-*-* ${syncTimes(job)
+  .map((time) => time.slice(0, 2))
+  .join(",")}:${job.at.slice(3)}:00
+Persistent=true
+RandomizedDelaySec=10m
+
+[Install]
+WantedBy=timers.target
+`;
+
 /**
  * A systemd user timer whose units live in `directory`. `Persistent=true` runs a missed sync
  * when the user's timers next start, after a short delay that lets the network come up.
@@ -212,22 +267,7 @@ Type=oneshot
 ExecStart=/bin/sh -lc ${systemdQuoted(posixScript(job))}
 `,
           }),
-          Action.Write({
-            file: timer,
-            contents: `[Unit]
-Description=AI usage sync ${job.every === 24 ? "once a day" : `every ${job.every}h`}
-
-[Timer]
-OnCalendar=*-*-* ${syncTimes(job)
-              .map((time) => time.slice(0, 2))
-              .join(",")}:${job.at.slice(3)}:00
-Persistent=true
-RandomizedDelaySec=10m
-
-[Install]
-WantedBy=timers.target
-`,
-          }),
+          Action.Write({ file: timer, contents: timerUnit(job) }),
           systemctl("required", ["daemon-reload"]),
           systemctl("required", ["enable", `${unit}.timer`]),
           // A timer that is already running keeps its old schedule until restarted.
@@ -252,11 +292,65 @@ WantedBy=timers.target
       }),
     ],
     status: [systemctl("reported", ["status", "--no-pager", `${unit}.timer`, `${unit}.service`])],
+    // A daily timer names a single hour: `OnCalendar=*-*-* 12:30:00`.
+    dailyJob: readJob(timer).pipe(
+      Effect.map(
+        Option.flatMap((contents) =>
+          Option.flatMap(
+            Option.fromNullishOr(/^OnCalendar=\*-\*-\* (\d{2}):(\d{2}):00$/m.exec(contents)),
+            ([, hour = "", minute = ""]) => dailyAt(hour, minute),
+          ),
+        ),
+      ),
+      Effect.map(
+        Option.map((at) => ({
+          at,
+          retime: (every: Interval) => [
+            Action.Write({ file: timer, contents: timerUnit({ at, every }) }),
+            systemctl("required", ["daemon-reload"]),
+            // Restarting only a running timer leaves one the user stopped stopped.
+            systemctl("required", ["try-restart", `${unit}.timer`]),
+          ],
+        })),
+      ),
+    ),
   };
 }
 
 const xmlText = (value: string) =>
   value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+
+/** A launchd `StartCalendarInterval` entry with one dict per sync time. */
+const calendarInterval = (job: Pick<ScheduledSync, "at" | "every">) =>
+  `<key>StartCalendarInterval</key>
+  <array>
+${syncTimes(job)
+  .map((time) => {
+    const [hour, minute] = time.split(":").map(Number);
+
+    return `    <dict>
+      <key>Hour</key>
+      <integer>${hour}</integer>
+      <key>Minute</key>
+      <integer>${minute}</integer>
+    </dict>`;
+  })
+  .join("\n")}
+  </array>`;
+
+// Its value is the dict or array that follows; a dict holds no dict, and an array no array.
+const startCalendarInterval =
+  /<key>StartCalendarInterval<\/key>\s*(?:<dict>[\s\S]*?<\/dict>|<array>[\s\S]*?<\/array>)/;
+
+const hourAndMinute =
+  /<key>Hour<\/key>\s*<integer>(\d{1,2})<\/integer>\s*<key>Minute<\/key>\s*<integer>(\d{1,2})<\/integer>/g;
+
+/**
+ * Waits for the process that started it to exit, then reloads the agent `$1` in domain `$2`
+ * from plist `$3`. Bootstrapping retries while launchd finishes unloading.
+ */
+const reloadAgent =
+  'while kill -0 "$PPID" 2>/dev/null; do sleep 1; done; launchctl bootout "$1"; for attempt in 1 2 3 4 5; do launchctl bootstrap "$2" "$3" && break; sleep 1; done';
 
 /**
  * A launchd agent for the user `uid` whose home is `home`. It also syncs when the agent loads
@@ -272,25 +366,11 @@ export function launchAgent(home: string, uid: number): Scheduler {
     name: "launchd agent",
     install: (job) =>
       posixJob(job).pipe(
-        Effect.map((job) => {
-          const times = syncTimes(job)
-            .map((time) => {
-              const [hour, minute] = time.split(":").map(Number);
-
-              return `    <dict>
-      <key>Hour</key>
-      <integer>${hour}</integer>
-      <key>Minute</key>
-      <integer>${minute}</integer>
-    </dict>`;
-            })
-            .join("\n");
-
-          return [
-            // Written first: a plist that cannot be written leaves the loaded agent running.
-            Action.Write({
-              file: plist,
-              contents: `<?xml version="1.0" encoding="UTF-8"?>
+        Effect.map((job) => [
+          // Written first: a plist that cannot be written leaves the loaded agent running.
+          Action.Write({
+            file: plist,
+            contents: `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -304,10 +384,7 @@ export function launchAgent(home: string, uid: number): Scheduler {
   </array>
   <key>RunAtLoad</key>
   <true/>
-  <key>StartCalendarInterval</key>
-  <array>
-${times}
-  </array>
+  ${calendarInterval(job)}
   <key>StandardOutPath</key>
   <string>${xmlText(log)}</string>
   <key>StandardErrorPath</key>
@@ -315,12 +392,11 @@ ${times}
 </dict>
 </plist>
 `,
-            }),
-            // Replacing a loaded agent requires unloading it; a first install has none.
-            run("silent", "launchctl", ["bootout", `${domain}/${label}`]),
-            run("required", "launchctl", ["bootstrap", domain, plist]),
-          ];
-        }),
+          }),
+          // Replacing a loaded agent requires unloading it; a first install has none.
+          run("silent", "launchctl", ["bootout", `${domain}/${label}`]),
+          run("required", "launchctl", ["bootstrap", domain, plist]),
+        ]),
       ),
     uninstall: [
       run("reported", "launchctl", ["bootout", `${domain}/${label}`]),
@@ -333,6 +409,39 @@ ${times}
       ),
     ],
     status: [run("reported", "launchctl", ["print", `${domain}/${label}`])],
+    // A daily agent's interval holds a single Hour and Minute, in a dict or a one-entry array.
+    dailyJob: readJob(plist).pipe(
+      Effect.map(
+        Option.flatMap((contents) =>
+          Option.flatMap(Option.fromNullishOr(startCalendarInterval.exec(contents)), ([block]) => {
+            const times = [...block.matchAll(hourAndMinute)];
+            const [, hour = "", minute = ""] = times[0] ?? [];
+
+            return times.length === 1
+              ? Option.map(dailyAt(hour, minute), (at) => ({
+                  at,
+                  retime: (every: Interval) => [
+                    Action.Write({
+                      file: plist,
+                      contents: contents.replace(startCalendarInterval, () =>
+                        calendarInterval({ at, every }),
+                      ),
+                    }),
+                    // launchd reads a plist only when it loads the agent, and unloading the
+                    // agent stops its running job, which may be this sync. So the reload
+                    // waits for this process to exit, outside the job's process group.
+                    Action.Launch({
+                      program: "/bin/sh",
+                      args: ["-c", reloadAgent, "sh", `${domain}/${label}`, domain, plist],
+                      shown: `/bin/sh -c '${reloadAgent}' sh ${domain}/${label} ${domain} ${plist}`,
+                    }),
+                  ],
+                }))
+              : Option.none();
+          }),
+        ),
+      ),
+    ),
   };
 }
 
@@ -356,6 +465,46 @@ const jscriptString = (value: string) =>
     /[\u007f-\uffff]/g,
     (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
   );
+
+/** PowerShell that sets `$trigger` to start a sync at each of `job`'s times. */
+const taskTrigger = (job: Pick<ScheduledSync, "at" | "every">) => [
+  `$trigger = New-ScheduledTaskTrigger -Daily -At '${syncTimes(job)[0]}'`,
+  // A daily trigger takes its repetition from a one-time trigger's. Repetition also fires at
+  // the end of its duration, so it ends at the day's last sync rather than at the next day's
+  // first, which the daily trigger starts.
+  ...(job.every === 24
+    ? []
+    : [
+        `$trigger.Repetition = (New-ScheduledTaskTrigger -Once -At '${syncTimes(job)[0]}' -RepetitionInterval (New-TimeSpan -Hours ${job.every}) -RepetitionDuration (New-TimeSpan -Hours ${24 - job.every})).Repetition`,
+      ]),
+];
+
+/**
+ * Prints the local time a once-a-day task starts at, and nothing for no task or another
+ * interval. Its start boundary keeps the time the task was registered with, even where it
+ * records an offset that has changed since.
+ */
+const dailyTaskScript = [
+  "$ErrorActionPreference = 'Stop'",
+  `$task = Get-ScheduledTask -TaskName ${powershellString(task)} -ErrorAction SilentlyContinue`,
+  "if ($task -and @($task.Triggers).Count -eq 1) {",
+  "  $trigger = @($task.Triggers)[0]",
+  "  if ($trigger.CimClass.CimClassName -eq 'MSFT_TaskDailyTrigger' -and $trigger.DaysInterval -eq 1 -and -not $trigger.Repetition.Interval) {",
+  "    $trigger.StartBoundary.Substring(11, 5)",
+  "  }",
+  "}",
+].join("\n");
+
+/** Runs a PowerShell `script`, showing it as written rather than encoded. */
+const powershell = (script: string) =>
+  Action.Run({
+    program: "powershell.exe",
+    args: powershellArguments(script),
+    shown: `powershell.exe ${powershellOptions.join(" ")} <the script below, as UTF-16LE Base64>\n${script}`,
+    outcome: "required",
+    hint: "",
+    gone: [],
+  });
 
 /**
  * A Task Scheduler task for the current user, with its windowless JScript launcher at `file`.
@@ -383,15 +532,7 @@ export function taskScheduler(file: string): Scheduler {
             "$ErrorActionPreference = 'Stop'",
             "$ProgressPreference = 'SilentlyContinue'",
             `$action = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument ${powershellString(`//B //Nologo //E:JScript "${file}"`)}`,
-            `$trigger = New-ScheduledTaskTrigger -Daily -At '${syncTimes(job)[0]}'`,
-            // A daily trigger takes its repetition from a one-time trigger's. Repetition also
-            // fires at the end of its duration, so it ends at the day's last sync rather than
-            // at the next day's first, which the daily trigger starts.
-            ...(job.every === 24
-              ? []
-              : [
-                  `$trigger.Repetition = (New-ScheduledTaskTrigger -Once -At '${syncTimes(job)[0]}' -RepetitionInterval (New-TimeSpan -Hours ${job.every}) -RepetitionDuration (New-TimeSpan -Hours ${24 - job.every})).Repetition`,
-                ]),
+            ...taskTrigger(job),
             "$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries",
             `Register-ScheduledTask -TaskName ${powershellString(task)} -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null`,
           ].join("\n");
@@ -403,14 +544,7 @@ export function taskScheduler(file: string): Scheduler {
               file,
               contents: `var shell = WScript.CreateObject("WScript.Shell");\nWScript.Quit(shell.Run(${jscriptString(`cmd.exe /d /v:off /s /c "${command}"`)}, 0, true));\n`,
             }),
-            Action.Run({
-              program: "powershell.exe",
-              args: powershellArguments(script),
-              shown: `powershell.exe ${powershellOptions.join(" ")} <the script below, as UTF-16LE Base64>\n${script}`,
-              outcome: "required",
-              hint: "",
-              gone: [],
-            }),
+            powershell(script),
           ];
         }),
       ),
@@ -425,6 +559,35 @@ export function taskScheduler(file: string): Scheduler {
       Action.Remove({ file }),
     ],
     status: [run("reported", "schtasks.exe", ["/Query", "/TN", task, "/V", "/FO", "LIST"])],
+    dailyJob: Effect.gen(function* () {
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+
+      const lines = yield* spawner
+        .lines(ChildProcess.make("powershell.exe", powershellArguments(dailyTaskScript)))
+        .pipe(
+          Effect.mapError(
+            () => new ScheduleError({ message: "Cannot ask Task Scheduler about the task." }),
+          ),
+        );
+
+      return Option.map(
+        Option.filter(Option.fromUndefinedOr(lines[0]?.trim()), isTimeOfDay),
+        (at): DailyJob => ({
+          at,
+          // Changing only the trigger keeps the task's launcher and settings, and a sync
+          // that is running now.
+          retime: (every) => [
+            powershell(
+              [
+                "$ErrorActionPreference = 'Stop'",
+                ...taskTrigger({ at, every }),
+                `Set-ScheduledTask -TaskName ${powershellString(task)} -Trigger $trigger | Out-Null`,
+              ].join("\n"),
+            ),
+          ],
+        }),
+      );
+    }),
   };
 }
 
@@ -461,6 +624,7 @@ export const describe = (actions: ReadonlyArray<Action>) =>
         Write: ({ file, contents }) => `write ${file}\n${contents.replaceAll(/^(?=.)/gm, "    ")}`,
         Remove: ({ file }) => `remove ${file}\n`,
         Run: ({ shown }) => `run ${shown}\n`,
+        Launch: ({ shown }) => `start ${shown}\n`,
       }),
     )
     .join("\n");
@@ -528,5 +692,59 @@ export const perform = Effect.fn("Schedule.perform")(function* (actions: Readonl
           Match.exhaustive,
         );
       },
+      // A detached child leads its own process group, and an unreferenced one is neither
+      // waited for nor stopped when its scope closes.
+      Launch: ({ program, args }) =>
+        spawner
+          .spawn(
+            ChildProcess.make(program, args, {
+              detached: true,
+              stdin: "ignore",
+              stdout: "ignore",
+              stderr: "ignore",
+            }),
+          )
+          .pipe(
+            Effect.flatMap((handle) => handle.unref),
+            Effect.scoped,
+            Effect.asVoid,
+            Effect.mapError(() => new ScheduleError({ message: `Cannot run ${program}.` })),
+          ),
     });
+});
+
+/** A once-a-day job that a sync moved to the default interval. */
+export interface Retimed {
+  readonly scheduler: string;
+  readonly at: TimeOfDay;
+  readonly every: Interval;
+}
+
+/**
+ * Moves an installed once-a-day job, the only schedule before `--every`, to the default
+ * interval from the same time of day, once per installation. `npx @latest` updates what the
+ * job runs, but only this changes when it runs. Afterwards, and after any `schedule install`,
+ * `schedule.json` keeps a chosen daily schedule as it is. A platform without a supported
+ * scheduler has no job to move.
+ */
+export const retimeDailySchedule = Effect.fn("Schedule.retimeDailySchedule")(function* (
+  directory: string,
+) {
+  if (yield* scheduleSettled(directory)) return Option.none<Retimed>();
+
+  const scheduler = yield* hostScheduler.pipe(Effect.option);
+
+  const daily = Option.isSome(scheduler)
+    ? yield* scheduler.value.dailyJob
+    : Option.none<DailyJob>();
+
+  if (Option.isSome(daily)) yield* perform(daily.value.retime(defaultInterval));
+
+  yield* settleSchedule(directory);
+
+  return Option.map(Option.all({ scheduler, daily }), ({ scheduler, daily }): Retimed => ({
+    scheduler: scheduler.name,
+    at: daily.at,
+    every: defaultInterval,
+  }));
 });

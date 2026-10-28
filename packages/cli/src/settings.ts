@@ -233,3 +233,40 @@ export const saveRepricing = Effect.fn("Settings.saveRepricing")(function* (
     ),
   );
 });
+
+/**
+ * `schedule.json` records that this installation's schedule is the user's choice: `schedule
+ * install` set it, or a sync already moved a once-a-day job from before `--every` to the
+ * default interval. Either way, no sync changes the schedule again.
+ */
+const ScheduleSettings = Schema.Struct({ version: Schema.Literal(1) });
+
+/** Whether `schedule.json` holds a valid record; a missing or unreadable one holds none. */
+export const scheduleSettled = Effect.fn("Settings.scheduleSettled")(function* (directory: string) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+
+  return yield* fs.readFileString(path.join(directory, "schedule.json")).pipe(
+    Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(ScheduleSettings))),
+    Effect.as(true),
+    Effect.orElseSucceed(() => false),
+  );
+});
+
+/** Writes `schedule.json`, so that no sync changes the schedule again. */
+export const settleSchedule = Effect.fn("Settings.settleSchedule")(function* (directory: string) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+
+  yield* fs.makeDirectory(directory, { recursive: true }).pipe(
+    Effect.andThen(
+      fs.writeFileString(
+        path.join(directory, "schedule.json"),
+        `${JSON.stringify({ version: 1 }, null, 2)}\n`,
+      ),
+    ),
+    Effect.mapError(
+      () => new SettingsError({ message: "Cannot save schedule.json in the settings directory." }),
+    ),
+  );
+});

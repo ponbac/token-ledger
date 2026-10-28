@@ -618,6 +618,12 @@ npx @ponbac/token-ledger@latest schedule install --every 24h --at 07:30   # once
 | `--provider <provider>` | Sync one provider only                                                   |
 | `--dry-run`             | Print the files and commands, and change nothing                         |
 
+Before `--every`, `schedule install` synced once a day. The first sync by 0.10.0 or
+later moves such a job to every two hours from the same time of day, keeping what it
+runs, and says so in its output. It does this once per installation and never after a
+`schedule install` of its own, so `schedule install --every 24h` keeps a daily sync.
+On macOS the agent reloads after that sync exits and syncs once more as it loads.
+
 `schedule status` shows the scheduler's own report, including the last run, and
 `schedule uninstall` removes the job and keeps your settings. A run's output is in
 `journalctl --user -u token-ledger-sync` on Linux and in
