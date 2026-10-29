@@ -17,6 +17,7 @@ export const CopilotAttributes = Schema.Struct({
   "gen_ai.usage.cache_creation.input_tokens": Schema.optionalKey(Schema.Natural),
   "gen_ai.usage.cache_read_input_tokens": Schema.optionalKey(Schema.Natural),
   "gen_ai.usage.cache_creation_input_tokens": Schema.optionalKey(Schema.Natural),
+  "gen_ai.usage.cache_write.input_tokens": Schema.optionalKey(Schema.Natural),
   "github.copilot.git.repository": Schema.optionalKey(Schema.String),
   "copilot_chat.repo.remote_url": Schema.optionalKey(Schema.String),
   "session.id": Schema.optionalKey(Schema.String),
@@ -68,11 +69,22 @@ interface Candidate {
   readonly hinted?: UsageRecord["repository"];
 }
 
+/**
+ * A Copilot request's identity: its response ID with its prompt and output token counts, as
+ * every copy of the request reports them. Prompt counts include cache reads and writes.
+ */
+export const requestId = (responseId: string, tokens: UsageRecord["tokens"]) =>
+  `response:${responseId}#${tokens.input + tokens.cacheRead + tokens.cacheWrite}:${tokens.output}`;
+
+/** Whether Copilot named a GitHub repository as `owner/name`, its identity on GitHub. */
+export const isOwnerAndName = (repository: string) =>
+  /^[A-Za-z0-9-]+\/(?!\.{1,2}$)[A-Za-z0-9_.-]+$/.test(repository);
+
 function repositoryReference(attributes: typeof CopilotAttributes.Type): UsageRecord["repository"] {
   const repository = attributes["github.copilot.git.repository"];
 
   if (repository !== undefined)
-    return /^[A-Za-z0-9-]+\/(?!\.{1,2}$)[A-Za-z0-9_.-]+$/.test(repository)
+    return isOwnerAndName(repository)
       ? RepositoryReference.Identity({ value: repository })
       : RepositoryReference.Remote({ value: repository });
 
@@ -152,9 +164,11 @@ export function copilotParser(
       const cacheRead =
         a["gen_ai.usage.cache_read.input_tokens"] ?? a["gen_ai.usage.cache_read_input_tokens"] ?? 0;
 
+      // The Copilot harness's Agent Host export names cache writes `cache_write`.
       const cacheWrite =
         a["gen_ai.usage.cache_creation.input_tokens"] ??
         a["gen_ai.usage.cache_creation_input_tokens"] ??
+        a["gen_ai.usage.cache_write.input_tokens"] ??
         0;
 
       if (cacheRead + cacheWrite > input) return skipped;
@@ -192,16 +206,27 @@ export function copilotParser(
         if (!isSpan && spanKey !== undefined && responseId !== undefined)
           eventResponses.set(spanKey, (eventResponses.get(spanKey) ?? new Set()).add(responseId));
 
-      const identified = candidates.map((candidate): Candidate => {
+      // The ID each request goes by, a span taking its event's as above.
+      const responses = candidates.map((candidate) => {
         const shared =
           candidate.isSpan && candidate.responseId === undefined && candidate.spanKey !== undefined
             ? eventResponses.get(candidate.spanKey)
             : undefined;
 
-        const responseId = shared?.size === 1 ? [...shared][0] : candidate.responseId;
+        return shared?.size === 1 ? [...shared][0] : candidate.responseId;
+      });
+
+      // VS Code's Local harness gives every request of a turn the turn's response ID, so a
+      // request goes by the ID and its prompt and output token counts, which differ between a
+      // turn's requests as its context grows. Every copy of a request, a span or an event in any
+      // export or a session log, shares that identity, however few of the turn's requests each
+      // source holds, and counts once.
+      const identified = candidates.map((candidate, index): Candidate => {
+        const responseId = responses[index];
 
         if (responseId === undefined) return candidate;
-        const record = { ...candidate.record, id: `response:${responseId}` };
+        const id = requestId(responseId, candidate.record.tokens);
+        const record = { ...candidate.record, id };
         const routed = chatgptRequests.get(responseId);
 
         if (routed === undefined) return { ...candidate, responseId, record };
@@ -217,9 +242,8 @@ export function copilotParser(
         };
       });
 
-      const preferred = new Map<string, Candidate>();
-
-      for (const candidate of identified) {
+      // A request's own repository, or else the nearest one among the spans enclosing it.
+      const inheritedRepository = (candidate: Candidate) => {
         let repository = candidate.record.repository;
         let key = candidate.spanKey;
         const visited = new Set<string>();
@@ -231,6 +255,13 @@ export function copilotParser(
           key = ancestor?.parent;
         }
 
+        return repository;
+      };
+
+      const preferred = new Map<string, Candidate>();
+
+      for (const candidate of identified) {
+        const repository = inheritedRepository(candidate);
         const resolved = { ...candidate, record: { ...candidate.record, repository } };
         const previous = preferred.get(resolved.record.id);
 

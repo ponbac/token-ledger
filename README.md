@@ -29,9 +29,11 @@ The default window is the current calendar month through today. `--since` and
 `--until` are inclusive local calendar days in the system time zone; select another
 IANA zone with `--time-zone`, such as `--time-zone Europe/Stockholm`. Days follow
 daylight saving time, so a day can last 23 or 25 hours. Read every
-supported source by omitting `--provider`. Copilot records nothing until its export
-is switched on: run [`copilot enable`](#enable-copilots-usage-export) before starting
-sessions; installing the CLI does not enable telemetry.
+supported source by omitting `--provider`. Copilot CLI and VS Code's Copilot harness
+keep their own session logs, which are read without setup. VS Code's Local harness and
+inline chat record nothing until Copilot's export is switched on: run
+[`copilot enable`](#enable-copilots-usage-export) before starting sessions; installing
+the CLI does not enable telemetry.
 
 ```sh
 npx @ponbac/token-ledger@latest report --since 2026-09-01 --until 2026-09-30 --format csv > usage.csv
@@ -100,6 +102,7 @@ node packages/cli/dist/main.js report
 | Codex                      | `~/.codex/sessions` and `archived_sessions`             | Rollout token events, model switches, session and working-directory metadata    |
 | Claude Code                | `~/.claude/projects`                                    | Assistant usage records; repeated message blocks counted once                   |
 | Grok Build                 | `~/.grok/sessions/**/updates.jsonl`                     | Saved completed turns and their model breakdowns                                |
+| Copilot sessions           | `~/.copilot/session-state/*/events.jsonl`               | Request usage and the workspace of Copilot CLI and VS Code Copilot harness runs |
 | Copilot CLI / VS Code Chat | `~/.copilot/otel` or `COPILOT_OTEL_FILE_EXPORTER_PATH`  | JSONL request spans, VS Code inference events, and SQLite span exports          |
 | Pi                         | `~/.pi/agent/sessions` or `PI_CODING_AGENT_SESSION_DIR` | Assistant messages on every branch, plus usage, compaction, and summary entries |
 | OpenCode                   | `~/.local/share/opencode`                               | Assistant messages in `opencode*.db` and legacy `storage/message` files         |
@@ -139,11 +142,31 @@ hyphenated ID. OpenCode's own recorded costs are not used for estimates.
 exactly zero to Codex, because OpenCode's ChatGPT sign-in clears every OpenAI model's
 rates. Other routes, OpenCode Zen and API keys among them, are API-equivalent estimates.
 
+### Copilot session logs
+
+The Copilot runtime behind Copilot CLI and VS Code's Copilot harness, the default for new
+VS Code chats since 1.143, keeps an event log per session in
+`~/.copilot/session-state/<session>/events.jsonl` (`$COPILOT_HOME/session-state`). It
+records each request's model and tokens whether or not an export is on, and the session's
+working directory and GitHub repository, which name the project. Those logs also hold the
+session's prompts, responses, and tool output: Token Ledger decodes only the session start
+and usage events, and never reads the rest. Requests on your own key (BYOK) are not
+Copilot's to bill and are left out of syncs, unless the local proxy routed them to a ChatGPT
+plan; a report, which reads no proxy hints, counts them. A request also found in Copilot's export below is
+counted once.
+
+The Copilot harness runs in VS Code's Agent Host, which ignores the Chat export settings
+below, so before session logs were read its requests went unrecorded. VS Code can also
+export them through a device-wide `managed-settings.json`
+([`telemetry.filePath`](https://code.visualstudio.com/docs/agents/guides/monitoring-agents));
+that file needs admin rights, turns off VS Code's Claude harness, and is not needed here.
+Its export is read like the others when it is in the export folder.
+
 ### Enable Copilot's usage export
 
-Copilot writes no usage log until a local OpenTelemetry file export is switched on,
-and nothing is backfilled: sessions from before that are lost. One command switches
-it on for Copilot CLI and VS Code Copilot Chat:
+VS Code's Local harness and inline chat write no usage log until a local OpenTelemetry
+file export is switched on, and nothing is backfilled: sessions from before that are lost.
+One command switches it on for Copilot CLI and VS Code Copilot Chat:
 
 ```sh
 npx @ponbac/token-ledger@latest copilot enable
@@ -923,7 +946,7 @@ For manual publication:
 1. Log in with `npm login` using an account with publish access to `@ponbac/token-ledger`.
 2. Run `bun run check`. The CLI test packs the package, installs it offline outside
    the repository with lifecycle scripts disabled, and exercises the installed CLI.
-3. Run `bun run pack` to create `dist/ponbac-token-ledger-0.10.0.tgz` (filename follows version).
+3. Run `bun run pack` to create `dist/ponbac-token-ledger-0.11.0.tgz` (filename follows version).
 4. Inspect `npm publish ./dist/npm --dry-run`.
 5. Publish with `npm publish ./dist/npm --access public`; complete npm's authentication
    prompt if requested.
