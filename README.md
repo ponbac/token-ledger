@@ -447,6 +447,19 @@ their common Git directory. Relative config paths resolve from the config file;
 `~/` resolves from the current developer's home. Directory mappings respect path
 boundaries, so `/work/app` never matches `/work/application`.
 
+The CLI remembers network repository identities in its local application data directory
+(`$XDG_DATA_HOME/token-ledger/repositories`, normally
+`~/.local/share/token-ledger/repositories`; on Windows under `%LOCALAPPDATA%`, and on
+macOS under `~/Library/Application Support`). Once a scan has saved a checkout or
+worktree's network origin, later scans keep its repository even after that directory is deleted.
+The nearest live or remembered repository wins, and explicit mappings take precedence; an existing directory
+without Git is never assigned from an old identity. Each directory is keyed by a
+hash, and saved identities omit credentials. A history read or write failure stops
+a real upload rather than replacing known attribution with missing metadata.
+Local reports and dry runs warn about history failures and continue; they also
+remember identities when the history directory is writable.
+This history cannot recover directories deleted before the first scan with it.
+
 Grok logs currently lack project metadata in the usage parser. Copilot CLI can put
 repository metadata on a parent agent span rather than the counted request span;
 Token Ledger associates the two. If an export has no repository metadata, use a

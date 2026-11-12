@@ -1,5 +1,6 @@
 import type { InstantRange } from "@token-ledger/core/calendar";
 import type { InvalidRequest, RepriceScan } from "@token-ledger/core/ledger";
+import type { RepositoryHistoryError } from "@token-ledger/core/repository-history";
 import { type PricingBasis, Provider } from "@token-ledger/core/model";
 import { RepricePayload, type SyncPayload, repriceChunks } from "@token-ledger/core/sync";
 import { Data, DateTime, Effect, type Redacted, Result, Schema } from "effect";
@@ -136,7 +137,7 @@ export interface RepriceRun {
   readonly scan: (
     provider: Provider,
     range: InstantRange,
-  ) => Effect.Effect<RepriceScan, InvalidRequest>;
+  ) => Effect.Effect<RepriceScan, InvalidRequest | RepositoryHistoryError>;
 }
 
 /** Sends one provider's buckets in its step's range, in requests the server accepts. */

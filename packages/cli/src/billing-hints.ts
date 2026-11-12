@@ -12,8 +12,8 @@ export const dataHome = Effect.gen(function* () {
   );
 });
 
-/** The proxy's conventional per-user directory, independent of roaming CLI settings. */
-export function billingHintsDirectory(
+/** Token Ledger's local application data directory, independent of roaming CLI settings. */
+export function tokenLedgerDataDirectory(
   platform: NodeJS.Platform,
   home: string,
   localAppData: Option.Option<string>,
@@ -32,5 +32,20 @@ export function billingHintsDirectory(
     Match.orElse(() => Option.getOrElse(xdgDataHome, () => path.join(home, ".local", "share"))),
   );
 
-  return path.join(root, "token-ledger", "billing-hints");
+  return path.join(root, "token-ledger");
+}
+
+/** The proxy's conventional per-user directory, independent of roaming CLI settings. */
+export function billingHintsDirectory(
+  platform: NodeJS.Platform,
+  home: string,
+  localAppData: Option.Option<string>,
+  xdgDataHome: Option.Option<string>,
+): string {
+  const path = platform === "win32" ? win32 : posix;
+
+  return path.join(
+    tokenLedgerDataDirectory(platform, home, localAppData, xdgDataHome),
+    "billing-hints",
+  );
 }
