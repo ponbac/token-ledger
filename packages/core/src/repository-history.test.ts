@@ -169,6 +169,9 @@ it.effect("retains concurrent scans and does not reuse history for a repurposed 
     yield* first.fs.makeDirectory(first.worktree);
     const reused = yield* ledger.syncPayload(first.request, client);
     assert.strictEqual(reused.buckets[0]?.project, "unattributed");
+    yield* first.fs.remove(first.worktree, { recursive: true });
+    const deletedAgain = yield* ledger.syncPayload(first.request, client);
+    assert.deepStrictEqual(deletedAgain.buckets, reused.buckets);
   }).pipe(Effect.provide(runtime)),
 );
 

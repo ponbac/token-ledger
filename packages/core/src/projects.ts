@@ -1,4 +1,4 @@
-import { Effect, FileSystem, Option, Path, Predicate } from "effect";
+import { Effect, FileSystem, Option, Path, Predicate, Result } from "effect";
 
 import {
   type ProjectMapping,
@@ -69,13 +69,13 @@ export const projectResolver = Effect.fn("Projects.resolver")(function* (
 
     while (true) {
       const git = path.join(current, ".git");
-      const stat = yield* fs.stat(git).pipe(Effect.option);
+      const stat = yield* fs.stat(git).pipe(Effect.result);
 
-      if (Option.isSome(stat)) {
+      if (Result.isSuccess(stat)) {
         root = current;
         let gitDirectory = git;
 
-        if (stat.value.type === "File") {
+        if (stat.success.type === "File") {
           const pointer = yield* readOptional(git);
           const match = /^gitdir:\s*(.+)\s*$/m.exec(Option.getOrElse(pointer, () => ""));
 
@@ -111,19 +111,22 @@ export const projectResolver = Effect.fn("Projects.resolver")(function* (
 
       // A live directory without Git metadata may have been reused for unrelated work.
       // History is a fallback only for a directory that has actually disappeared.
-      if (
-        historyConfig !== undefined &&
-        !(yield* fs.exists(current).pipe(Effect.orElseSucceed(() => true)))
-      ) {
-        const previous = yield* history.read(current);
+      if (historyConfig !== undefined && Predicate.isTagged(stat.failure.reason, "NotFound")) {
+        const exists = yield* fs.exists(current).pipe(Effect.option);
 
-        if (previous !== null) {
-          root = current;
-          repository =
-            previous.repository === null
-              ? null
-              : RepositoryReference.Identity({ value: previous.repository });
-          break;
+        if (Option.isSome(exists)) {
+          const previous = yield* history.read(current);
+
+          if (previous !== null && !exists.value) {
+            root = current;
+            repository =
+              previous.repository === null
+                ? null
+                : RepositoryReference.Identity({ value: previous.repository });
+            break;
+          }
+
+          if (previous !== null && previous.repository !== null) history.remember(current, null);
         }
       }
 

@@ -456,6 +456,7 @@ The nearest live or remembered repository wins, and explicit mappings take prece
 without Git is never assigned from an old identity. Each directory is keyed by a
 hash, and saved identities omit credentials. Observing a local or absent origin
 invalidates its former network identity, including after the directory is deleted.
+The same applies to a remembered root observed to exist without Git metadata.
 A history read or write failure stops
 a real upload rather than replacing known attribution with missing metadata.
 Local reports and dry runs warn about history failures and continue; they also
