@@ -13,7 +13,8 @@ const Entry = Schema.Struct({
   version: Schema.Literal(1),
   // An identity is host/path, not a URL: SCP paths can contain spaces and Unicode,
   // and a port must not be removed using another transport's default.
-  repository: Schema.NonEmptyString.check(Schema.isPattern(/^[^/\s@]+\/[^\r\n]+$/u)),
+  // Null records an observed loss of a network origin, preventing an old identity's revival.
+  repository: Schema.NullOr(Schema.NonEmptyString.check(Schema.isPattern(/^[^/\s@]+\/[^\r\n]+$/u))),
 });
 
 /**
@@ -28,7 +29,7 @@ export const repositoryHistory = Effect.fn("RepositoryHistory.open")(function* (
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const pending = new Map<string, typeof Entry.Type>();
-  const loaded = new Map<string, string | null>();
+  const loaded = new Map<string, typeof Entry.Type | null>();
   const directory = config?.directory;
 
   const filename = (root: string) =>
@@ -43,7 +44,7 @@ export const repositoryHistory = Effect.fn("RepositoryHistory.open")(function* (
     const key = filename(root);
     const observed = pending.get(key);
 
-    if (observed !== undefined) return observed.repository;
+    if (observed !== undefined) return observed;
 
     const cached = loaded.get(key);
 
@@ -69,13 +70,12 @@ export const repositoryHistory = Effect.fn("RepositoryHistory.open")(function* (
       Effect.catchTag("RepositoryHistoryError", (error) => recover(error).pipe(Effect.as(null))),
     );
 
-    const repository = saved?.repository ?? null;
-    loaded.set(key, repository);
+    loaded.set(key, saved);
 
-    return repository;
+    return saved;
   });
 
-  const remember = (root: string, repository: string) => {
+  const remember = (root: string, repository: string | null) => {
     const entry = Schema.decodeUnknownOption(Entry)({ version: 1, repository });
 
     if (directory !== undefined && Option.isSome(entry)) pending.set(filename(root), entry.value);

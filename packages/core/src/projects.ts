@@ -96,10 +96,15 @@ export const projectResolver = Effect.fn("Projects.resolver")(function* (
         if (url?.[1]) {
           const remote = url[1].trim();
           repository = RepositoryReference.Remote({ value: remote });
-
-          // Keep the worktree root, before commondir changed root to the main checkout.
-          if (isNetworkRemote(remote)) history.remember(current, repositoryIdentity(remote));
         }
+
+        // Keep the worktree root, before commondir changed root to the main checkout.
+        // A readable config also proves when an old network origin is no longer present.
+        if (Option.isSome(config))
+          history.remember(
+            current,
+            url?.[1] && isNetworkRemote(url[1].trim()) ? repositoryIdentity(url[1].trim()) : null,
+          );
 
         break;
       }
@@ -114,7 +119,10 @@ export const projectResolver = Effect.fn("Projects.resolver")(function* (
 
         if (previous !== null) {
           root = current;
-          repository = RepositoryReference.Identity({ value: previous });
+          repository =
+            previous.repository === null
+              ? null
+              : RepositoryReference.Identity({ value: previous.repository });
           break;
         }
       }

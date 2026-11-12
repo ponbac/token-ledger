@@ -306,3 +306,26 @@ it.effect("warns once for a damaged root used by many working directories in one
     assert.lengthOf(warnings, 1);
   }).pipe(Effect.provide(runtime)),
 );
+
+it.effect("does not revive a network origin after observing a local or absent origin", () =>
+  Effect.gen(function* () {
+    const ledger = yield* Ledger;
+
+    for (const config of ['[remote "origin"]\nurl = ../local.git\n', "[core]\nbare = false\n"]) {
+      const { fs, path, root, git, worktree, request } = yield* fixture();
+      yield* fs.makeDirectory(path.join(root, ".git"));
+      yield* fs.writeFileString(
+        path.join(root, ".git", "config"),
+        '[remote "origin"]\nurl = https://example.com/me/outer.git\n',
+      );
+      const first = yield* ledger.syncPayload(request, client);
+      assert.strictEqual(first.buckets[0]?.project, "example.com/team/app");
+      yield* fs.writeFileString(path.join(git, "config"), config);
+      const repurposed = yield* ledger.syncPayload(request, client);
+      assert.strictEqual(repurposed.buckets[0]?.project, "unattributed");
+      yield* fs.remove(worktree, { recursive: true });
+      const deleted = yield* ledger.syncPayload(request, client);
+      assert.deepStrictEqual(deleted.buckets, repurposed.buckets);
+    }
+  }).pipe(Effect.provide(runtime)),
+);

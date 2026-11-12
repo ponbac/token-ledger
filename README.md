@@ -454,7 +454,9 @@ macOS under `~/Library/Application Support`). Once a scan has saved a checkout o
 worktree's network origin, later scans keep its repository even after that directory is deleted.
 The nearest live or remembered repository wins, and explicit mappings take precedence; an existing directory
 without Git is never assigned from an old identity. Each directory is keyed by a
-hash, and saved identities omit credentials. A history read or write failure stops
+hash, and saved identities omit credentials. Observing a local or absent origin
+invalidates its former network identity, including after the directory is deleted.
+A history read or write failure stops
 a real upload rather than replacing known attribution with missing metadata.
 Local reports and dry runs warn about history failures and continue; they also
 remember identities when the history directory is writable.
