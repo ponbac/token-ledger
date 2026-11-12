@@ -31,6 +31,7 @@ import {
 } from "./model.ts";
 import { addUsage, priceRecord } from "./pricing.ts";
 import { type Attribution, projectResolver } from "./projects.ts";
+import type { RepositoryHistoryError } from "./repository-history.ts";
 import { claudeParser } from "./providers/claude.ts";
 import { codexParser } from "./providers/codex.ts";
 import { copilotDatabaseLines, type CopilotDatabaseError } from "./providers/copilot-db.ts";
@@ -105,13 +106,16 @@ export interface RepriceScan {
 export class Ledger extends Context.Service<
   Ledger,
   {
-    readonly report: (request: ReportRequest) => Effect.Effect<UsageReport, InvalidRequest>;
+    readonly report: (
+      request: ReportRequest,
+      onWarning?: WarningSink,
+    ) => Effect.Effect<UsageReport, InvalidRequest | RepositoryHistoryError>;
     /** Hourly session buckets for upload; local paths and raw session IDs never enter the payload. */
     readonly syncPayload: (
       request: ReportRequest,
       client: SyncClient,
       onWarning?: WarningSink,
-    ) => Effect.Effect<SyncPayload, InvalidRequest>;
+    ) => Effect.Effect<SyncPayload, InvalidRequest | RepositoryHistoryError>;
     /**
      * As `syncPayload`, with the window begun early enough to hold all usage found before
      * `since` as well. `since` in the result is the local day the window then starts on. Meant
@@ -122,7 +126,7 @@ export class Ledger extends Context.Service<
       request: ReportRequest,
       client: SyncClient,
       onWarning?: WarningSink,
-    ) => Effect.Effect<HistoryPayload, InvalidRequest>;
+    ) => Effect.Effect<HistoryPayload, InvalidRequest | RepositoryHistoryError>;
     /**
      * One provider's hourly session buckets in `range`, half-open on whole UTC hours, built as
      * `syncPayload` builds an upload's: the same sources, project mappings, billing hints,
@@ -135,7 +139,7 @@ export class Ledger extends Context.Service<
       request: ReportRequest,
       provider: Provider,
       range: InstantRange,
-    ) => Effect.Effect<RepriceScan, InvalidRequest>;
+    ) => Effect.Effect<RepriceScan, InvalidRequest | RepositoryHistoryError>;
   }
 >()("token-ledger/Ledger") {
   /** Filesystem implementation. All mutable aggregation and deduplication state belongs to a single call. */
@@ -157,6 +161,8 @@ export class Ledger extends Context.Service<
         );
 
         if (
+          (request.repositoryHistory !== undefined &&
+            !path.isAbsolute(request.repositoryHistory.directory)) ||
           (request.billingHints !== undefined &&
             !path.isAbsolute(request.billingHints.directory)) ||
           request.sources.some((source) => !path.isAbsolute(source.path)) ||
@@ -165,7 +171,8 @@ export class Ledger extends Context.Service<
           )
         ) {
           return yield* new InvalidRequest({
-            message: "Source, billing hint, and project mapping paths must be absolute.",
+            message:
+              "Source, repository history, billing hint, and project mapping paths must be absolute.",
           });
         }
 
@@ -215,7 +222,11 @@ export class Ledger extends Context.Service<
             ) ?? Effect.void
           );
 
-        const resolveProject = yield* projectResolver(request.projects).pipe(
+        const projects = yield* projectResolver(
+          request.projects,
+          request.repositoryHistory,
+          onWarning,
+        ).pipe(
           Effect.provideService(FileSystem.FileSystem, fs),
           Effect.provideService(Path.Path, path),
         );
@@ -227,9 +238,9 @@ export class Ledger extends Context.Service<
         // Built once every source is read, when its duplicate count is final.
         const coverage: Array<() => Coverage> = [];
         // A fork's copies wait for every source, so whichever file holds the original wins.
-        const inherited: Array<Effect.Effect<void>> = [];
+        const inherited: Array<Effect.Effect<void, RepositoryHistoryError>> = [];
         // Records only every source can classify as originals or copies; run before the copies.
-        const deferred: Array<Effect.Effect<void>> = [];
+        const deferred: Array<Effect.Effect<void, RepositoryHistoryError>> = [];
 
         // Copilot records wait for every source, then each request's copies merge: a session
         // log's copy wins whatever the order of sources, an export's names a repository the
@@ -238,7 +249,10 @@ export class Ledger extends Context.Service<
           readonly record: UsageRecord;
           readonly slot: Slot;
           readonly fromSession: boolean;
-          readonly place: (record: UsageRecord, slot: Slot) => Effect.Effect<void>;
+          readonly place: (
+            record: UsageRecord,
+            slot: Slot,
+          ) => Effect.Effect<void, RepositoryHistoryError>;
         }> = [];
 
         const copilotExcluded = new Set<string>();
@@ -271,7 +285,7 @@ export class Ledger extends Context.Service<
             }
 
             seen.add(id);
-            collect(record, yield* resolveProject(record, source.project), slot);
+            collect(record, yield* projects.resolve(record, source.project), slot);
           });
 
           /** `fromSession` for a Copilot session log's results; Copilot records wait for every source. */
@@ -426,6 +440,9 @@ export class Ledger extends Context.Service<
             }).pipe(Effect.result);
 
             if (Result.isFailure(result)) {
+              if (Predicate.isTagged(result.failure, "RepositoryHistoryError"))
+                return yield* result.failure;
+
               if (
                 entry === source.path &&
                 Predicate.isTagged(result.failure, "PlatformError") &&
@@ -506,29 +523,50 @@ export class Ledger extends Context.Service<
 
         for (const copy of inherited) yield* copy;
 
+        yield* projects.flush();
+
         return coverage.map((summarize) => summarize());
       });
 
-      const report = Effect.fn("Ledger.report")(function* (input: ReportRequest) {
-        const request = yield* decode(input);
+      const report = Effect.fn("Ledger.report")(function* (
+        input: ReportRequest,
+        onWarning?: WarningSink,
+      ) {
+        const decoded = yield* decode(input);
+
+        const request: ReportRequest =
+          decoded.repositoryHistory === undefined
+            ? decoded
+            : {
+                ...decoded,
+                repositoryHistory: { ...decoded.repositoryHistory, required: false },
+              };
+
         const window = dayWindow(request.since, request.until, request.timeZone);
         const rows = new Map<string, ReportRow>();
 
         // No billing hints are read here, so a Copilot request routed to a ChatGPT plan is
         // priced as Copilot-paid, with Copilot's rate card.
-        const coverage = yield* scan(request, window, window.dayOf, (record, { project }, day) => {
-          const key = JSON.stringify([project, day, record.provider, record.model]);
-          const { usd, base } = priceRecord(record, request.pricing);
+        const coverage = yield* scan(
+          request,
+          window,
+          window.dayOf,
+          (record, { project }, day) => {
+            const key = JSON.stringify([project, day, record.provider, record.model]);
+            const { usd, base } = priceRecord(record, request.pricing);
 
-          rows.set(key, {
-            project,
-            day,
-            provider: record.provider,
-            model: record.model,
-            pricePerMillion: base,
-            ...addUsage(rows.get(key), record.tokens, usd),
-          });
-        });
+            rows.set(key, {
+              project,
+              day,
+              provider: record.provider,
+              model: record.model,
+              pricePerMillion: base,
+              ...addUsage(rows.get(key), record.tokens, usd),
+            });
+          },
+          undefined,
+          onWarning,
+        );
 
         return UsageReport.make({
           version: 2,

@@ -183,6 +183,14 @@ export type Day = typeof Day.Type;
 
 /** Inclusive local calendar days in a named time zone and all inputs to a report. Paths must be absolute. */
 export const ReportRequest = Schema.Struct({
+  /** Local durable repository identities used after a checkout or worktree is deleted. */
+  repositoryHistory: Schema.optionalKey(
+    Schema.Struct({
+      directory: Schema.NonEmptyString,
+      /** Uploads require durable history; Ledger.report always treats it as optional. */
+      required: Schema.Boolean,
+    }),
+  ),
   billingHints: Schema.optionalKey(
     Schema.Struct({ directory: Schema.NonEmptyString, required: Schema.Boolean }),
   ),

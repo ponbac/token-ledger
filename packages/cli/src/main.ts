@@ -32,7 +32,7 @@ import { Command, Flag, Prompt } from "effect/cli";
 import { FetchHttpClient } from "effect/http";
 
 import metadata from "../package.json" with { type: "json" };
-import { billingHintsDirectory, dataHome } from "./billing-hints.ts";
+import { billingHintsDirectory, dataHome, tokenLedgerDataDirectory } from "./billing-hints.ts";
 
 import {
   type Host,
@@ -144,6 +144,7 @@ interface UsageOptions {
   readonly project: Option.Option<string>;
   readonly config: Option.Option<string>;
   readonly offline: boolean;
+  readonly dryRun?: boolean;
 }
 
 /** Resolves configuration, discovery, pricing, and the local-day window into a ledger request. */
@@ -299,6 +300,18 @@ const usageRequest = Effect.fn("CLI.usageRequest")(function* (
     );
 
   const request = yield* ReportRequest.makeEffect({
+    repositoryHistory: {
+      directory: path.join(
+        tokenLedgerDataDirectory(
+          process.platform,
+          home,
+          yield* Config.String("LOCALAPPDATA").pipe(Config.option),
+          yield* dataHome,
+        ),
+        "repositories",
+      ),
+      required: !flags.dryRun,
+    },
     billingHints:
       configuration.billingHintsDirectory === undefined
         ? {
@@ -351,7 +364,7 @@ const report = Command.make(
   Effect.fn("CLI.report")(function* (flags) {
     const { request } = yield* usageRequest(flags, (today) => `${today.slice(0, 7)}-01`);
     const ledger = yield* Ledger;
-    const result = yield* ledger.report(request);
+    const result = yield* ledger.report(request, Console.error);
 
     const output = Match.value(flags.json ? "json" : flags.format).pipe(
       Match.when("json", () => JSON.stringify(result, null, 2)),

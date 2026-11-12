@@ -57,6 +57,90 @@ const decodeSettings = Schema.decodeUnknownSync(
   Schema.fromJsonString(Schema.Struct({ server: Schema.String, token: Schema.String })),
 );
 
+await test("packaged sync keeps repository attribution after the checkout is removed", () => {
+  const directory = mkdtempSync(join(tmpdir(), "token-ledger-history-cli-"));
+
+  try {
+    const checkout = join(directory, "checkout");
+    const source = join(directory, "claude.jsonl");
+    const config = join(directory, "token-ledger.json");
+    mkdirSync(join(checkout, ".git"), { recursive: true });
+    writeFileSync(
+      join(checkout, ".git", "config"),
+      '[remote "origin"]\nurl = https://example.com/team/app.git\n',
+    );
+    writeFileSync(
+      source,
+      JSON.stringify({
+        type: "assistant",
+        sessionId: "fixture",
+        cwd: checkout,
+        timestamp: "2026-09-22T12:00:00Z",
+        message: { id: "message", model: "fixture", usage: { input_tokens: 10, output_tokens: 2 } },
+      }) + "\n",
+    );
+    writeFileSync(config, JSON.stringify({ sources: [{ provider: "claude", path: source }] }));
+
+    const scan = () => {
+      const result = spawnSync(
+        process.execPath,
+        [
+          join(packageDirectory, "dist/main.js"),
+          "sync",
+          "--dry-run",
+          "--offline",
+          "--config",
+          config,
+          "--since",
+          "2026-09-22",
+          "--until",
+          "2026-09-22",
+          "--time-zone",
+          "UTC",
+        ],
+        {
+          cwd: directory,
+          encoding: "utf8",
+          timeout: 30_000,
+          env: {
+            ...process.env,
+            HOME: directory,
+            USERPROFILE: directory,
+            LOCALAPPDATA: join(directory, "local"),
+            XDG_DATA_HOME: join(directory, "data"),
+            XDG_CONFIG_HOME: join(directory, "config"),
+            XDG_CACHE_HOME: join(directory, "cache"),
+            TOKEN_LEDGER_SERVER: undefined,
+            TOKI_API_TOKEN: undefined,
+          },
+        },
+      );
+
+      assert.equal(result.status, 0, result.stderr);
+
+      return decodePayload(result.stdout).buckets;
+    };
+
+    const first = scan();
+    assert.equal(first[0]?.project, "example.com/team/app");
+    rmSync(checkout, { recursive: true });
+    assert.deepEqual(scan(), first);
+
+    const dataRoot = Match.value(process.platform).pipe(
+      Match.when("win32", () => join(directory, "local")),
+      Match.when("darwin", () => join(directory, "Library", "Application Support")),
+      Match.orElse(() => join(directory, "data")),
+    );
+
+    const history = join(dataRoot, "token-ledger", "repositories");
+
+    for (const name of readdirSync(history)) writeFileSync(join(history, name), "damaged");
+    assert.equal(scan()[0]?.project, "unattributed");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 await test("npm artifact installs offline and exports reports with correct coverage and exit codes", () => {
   const directory = mkdtempSync(join(tmpdir(), "token-ledger-cli-"));
 

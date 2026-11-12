@@ -1,6 +1,12 @@
-import { Effect, FileSystem, Option, Path } from "effect";
+import { Effect, FileSystem, Option, Path, Predicate, Result } from "effect";
 
-import type { ProjectMapping, UsageRecord } from "./model.ts";
+import {
+  type ProjectMapping,
+  type ReportRequest,
+  RepositoryReference,
+  type UsageRecord,
+} from "./model.ts";
+import { type RepositoryHistoryError, repositoryHistory } from "./repository-history.ts";
 
 const scpRemote = /^(?:[^/@\s]+@)?(\[[^\]\s]+\]|[^/:\\\s]+):((?!\/\/).+)$/;
 
@@ -39,10 +45,18 @@ function isNetworkRemote(remote: string): boolean {
 /** Creates one report-scoped resolver. Worktrees share their common Git remote or repository root. */
 export const projectResolver = Effect.fn("Projects.resolver")(function* (
   mappings: readonly ProjectMapping[],
+  historyConfig?: ReportRequest["repositoryHistory"],
+  onWarning?: (message: string) => Effect.Effect<void>,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const resolved = new Map<string, { readonly root: string; readonly remote: string | null }>();
+  const history = yield* repositoryHistory(historyConfig, onWarning);
+
+  const resolved = new Map<
+    string,
+    { readonly root: string; readonly repository: RepositoryReference | null }
+  >();
+
   const readOptional = (file: string) => fs.readFileString(file).pipe(Effect.option);
 
   const discover = Effect.fn("Projects.discover")(function* (cwd: string) {
@@ -51,17 +65,17 @@ export const projectResolver = Effect.fn("Projects.resolver")(function* (
     if (cached !== undefined) return cached;
     let current = cwd;
     let root = cwd;
-    let remote: string | null = null;
+    let repository: RepositoryReference | null = null;
 
     while (true) {
       const git = path.join(current, ".git");
-      const stat = yield* fs.stat(git).pipe(Effect.option);
+      const stat = yield* fs.stat(git).pipe(Effect.result);
 
-      if (Option.isSome(stat)) {
+      if (Result.isSuccess(stat)) {
         root = current;
         let gitDirectory = git;
 
-        if (stat.value.type === "File") {
+        if (stat.success.type === "File") {
           const pointer = yield* readOptional(git);
           const match = /^gitdir:\s*(.+)\s*$/m.exec(Option.getOrElse(pointer, () => ""));
 
@@ -79,8 +93,41 @@ export const projectResolver = Effect.fn("Projects.resolver")(function* (
         const origin = /\[remote "origin"\]([^[]*)/.exec(Option.getOrElse(config, () => ""));
         const url = /^\s*url\s*=\s*(.+)$/m.exec(origin?.[1] ?? "");
 
-        if (url?.[1]) remote = url[1].trim();
+        if (url?.[1]) {
+          const remote = url[1].trim();
+          repository = RepositoryReference.Remote({ value: remote });
+        }
+
+        // Keep the worktree root, before commondir changed root to the main checkout.
+        // A readable config also proves when an old network origin is no longer present.
+        if (Option.isSome(config))
+          history.remember(
+            current,
+            url?.[1] && isNetworkRemote(url[1].trim()) ? repositoryIdentity(url[1].trim()) : null,
+          );
+
         break;
+      }
+
+      // A live directory without Git metadata may have been reused for unrelated work.
+      // History is a fallback only for a directory that has actually disappeared.
+      if (historyConfig !== undefined && Predicate.isTagged(stat.failure.reason, "NotFound")) {
+        const exists = yield* fs.exists(current).pipe(Effect.option);
+
+        if (Option.isSome(exists)) {
+          const previous = yield* history.read(current);
+
+          if (previous !== null && !exists.value) {
+            root = current;
+            repository =
+              previous.repository === null
+                ? null
+                : RepositoryReference.Identity({ value: previous.repository });
+            break;
+          }
+
+          if (previous !== null && previous.repository !== null) history.remember(current, null);
+        }
       }
 
       const parent = path.dirname(current);
@@ -89,22 +136,18 @@ export const projectResolver = Effect.fn("Projects.resolver")(function* (
       current = parent;
     }
 
-    const identity = { root, remote };
+    const identity = { root, repository };
     resolved.set(cwd, identity);
 
     return identity;
   });
 
-  return Effect.fn("Projects.resolve")(function* (
+  const resolve = Effect.fn("Projects.resolve")(function* (
     record: UsageRecord,
     fixedProject: string | undefined,
-  ): Effect.fn.Return<Attribution> {
+  ): Effect.fn.Return<Attribution, RepositoryHistoryError> {
     if (fixedProject !== undefined) return { project: fixedProject, shareable: true };
     const cwd = record.cwd;
-    const identity = cwd === null ? null : yield* discover(cwd);
-
-    const rawRemote = record.repository?.value ?? identity?.remote ?? null;
-    const remote = rawRemote === null ? null : repositoryIdentity(rawRemote);
 
     let bestPath: { readonly project: string; readonly length: number } | null = null;
 
@@ -124,6 +167,16 @@ export const projectResolver = Effect.fn("Projects.resolver")(function* (
 
     if (bestPath !== null) return { project: bestPath.project, shareable: true };
 
+    const identity = record.repository !== null || cwd === null ? null : yield* discover(cwd);
+    const reference = record.repository ?? identity?.repository ?? null;
+
+    const remote =
+      reference === null
+        ? null
+        : Predicate.isTagged(reference, "Identity")
+          ? reference.value
+          : repositoryIdentity(reference.value);
+
     for (const mapping of mappings) {
       if (
         remote !== null &&
@@ -132,13 +185,16 @@ export const projectResolver = Effect.fn("Projects.resolver")(function* (
         return { project: mapping.project, shareable: true };
     }
 
-    if (rawRemote !== null && remote !== null)
+    if (reference !== null && remote !== null)
       return {
         project: remote,
         shareable:
-          remote !== "" && (record.repository?._tag === "Identity" || isNetworkRemote(rawRemote)),
+          remote !== "" &&
+          (Predicate.isTagged(reference, "Identity") || isNetworkRemote(reference.value)),
       };
 
     return { project: identity?.root ?? "Unassigned", shareable: false };
   });
+
+  return { resolve, flush: history.flush };
 });
