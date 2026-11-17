@@ -1,7 +1,47 @@
 {
-  "version": "2026-10-24",
+  "version": "2026-11-17",
   "description": "GitHub Copilot's AI credit rates in USD per million tokens (1 credit = $0.01). effectiveFrom is the UTC day a rate took effect: the day GitHub's usage report starts billing it where that is known, otherwise the day of the GitHub docs change that listed it; 2026-08-21 is the oldest version read, and a model's first entry also prices its earlier usage. long applies to the whole request when input + cacheRead + cacheWrite exceeds its above. uncachedInput cacheWrite bills all but three uncached input tokens at the cache-write rate when a record reports no cache writes. confirmed entries match GitHub's bills or usage report; provisional ones have not been matched yet.",
   "entries": [
+    {
+      "model": "gpt-6.2-astra",
+      "effectiveFrom": "2026-11-17",
+      "status": "provisional",
+      "source": "https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing",
+      "uncachedInput": "cacheWrite",
+      "base": {
+        "input": 8,
+        "cacheRead": 0.4,
+        "cacheWrite": 10,
+        "output": 40
+      },
+      "long": {
+        "above": 272000,
+        "input": 16,
+        "cacheRead": 0.8,
+        "cacheWrite": 20,
+        "output": 60
+      }
+    },
+    {
+      "model": "gpt-6.2-sol",
+      "effectiveFrom": "2026-11-17",
+      "status": "provisional",
+      "source": "https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing",
+      "uncachedInput": "cacheWrite",
+      "base": {
+        "input": 2,
+        "cacheRead": 0.1,
+        "cacheWrite": 2.5,
+        "output": 10
+      },
+      "long": {
+        "above": 272000,
+        "input": 4,
+        "cacheRead": 0.2,
+        "cacheWrite": 5,
+        "output": 15
+      }
+    },
     {
       "model": "gpt-6.1-sol",
       "effectiveFrom": "2026-09-29",

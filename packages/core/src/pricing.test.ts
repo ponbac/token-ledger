@@ -393,6 +393,40 @@ describe("vendor rates", () => {
 });
 
 describe("Copilot-paid requests", () => {
+  it("prices GPT-6.2 Sol and Astra from the bundled card without vendor rates", () => {
+    const book = PriceBook.make({
+      status: "unavailable",
+      fetchedAt: null,
+      source: "https://example.com/rates.json",
+      prices: {},
+    });
+
+    const released = Date.parse("2026-11-17T12:00:00Z");
+
+    // The existing cache-write rule prices 3 input tokens and 9,997 inferred writes here.
+    for (const { model, shortUsd, longUsd } of [
+      { model: "gpt-6.2-sol", shortUsd: 0.0611985, longUsd: 0.1173972 },
+      { model: "gpt-6.2-astra", shortUsd: 0.244794, longUsd: 0.4695888 },
+    ]) {
+      const short = request(
+        model,
+        tokens(10_000, 262_000, 0, 1_000),
+        { provider: "copilot" },
+        released,
+      );
+
+      const long = request(
+        model,
+        tokens(10_000, 262_001, 0, 1_000),
+        { provider: "copilot" },
+        released,
+      );
+
+      assert.closeTo(priceRecord(short, book).usd ?? -1, shortUsd, 1e-12, model);
+      assert.closeTo(priceRecord(long, book).usd ?? -1, longUsd, 1e-12, model);
+    }
+  });
+
   it.effect("take Copilot's card, with its cache-write rule and long tier", () =>
     withLitellm((book) =>
       Effect.sync(() => {
