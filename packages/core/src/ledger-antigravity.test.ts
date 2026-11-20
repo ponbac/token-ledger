@@ -1307,6 +1307,9 @@ describe("Antigravity usage through the Ledger", () => {
         const badWireDir = path.join(root, "bad-wire");
         yield* fs.makeDirectory(badWireDir, { recursive: true });
 
+        const badFixedWireDir = path.join(root, "bad-fixed-wire");
+        yield* fs.makeDirectory(badFixedWireDir, { recursive: true });
+
         const overlapDir = path.join(root, "overlap-unrecognized");
         yield* fs.makeDirectory(overlapDir, { recursive: true });
         yield* createDatabase(path.join(overlapDir, "empty-ok.db"), () => {});
@@ -1356,6 +1359,34 @@ describe("Antigravity usage through the Ledger", () => {
           badWireDb.close();
         }
 
+        const badFixedWireDb = new DatabaseSync(path.join(badFixedWireDir, "bad-fixed-wire.db"));
+
+        try {
+          badFixedWireDb.exec("CREATE TABLE steps (idx INTEGER PRIMARY KEY, metadata BLOB);");
+
+          // Encode usage field 2 (input tokens) as wire-5 fixed32 instead of wire-0 varint.
+          const badFixedUsage = [
+            ...protoFieldVarint(1, 1532),
+            ...protoVarint(2 * 8 + 5),
+            100,
+            0,
+            0,
+            0,
+            ...protoFieldText(11, "req-bad-fixed-wire"),
+          ];
+
+          const badFixedStep = new Uint8Array([
+            ...protoFieldBytes(8, protoTimestamp("2026-11-20T12:00:00.000Z")),
+            ...protoFieldBytes(9, badFixedUsage),
+          ]);
+
+          badFixedWireDb
+            .prepare("INSERT INTO steps (idx, metadata) VALUES (?, ?)")
+            .run(0, badFixedStep);
+        } finally {
+          badFixedWireDb.close();
+        }
+
         const overlapBadFile = path.join(overlapDir, "unrelated.db");
         const overlapBadDb = new DatabaseSync(overlapBadFile);
 
@@ -1365,7 +1396,7 @@ describe("Antigravity usage through the Ledger", () => {
           overlapBadDb.close();
         }
 
-        for (const badDir of [trajOnlyDir, emptyGenDir, badWireDir]) {
+        for (const badDir of [trajOnlyDir, emptyGenDir, badWireDir, badFixedWireDir]) {
           const checkedSync = yield* ledger.syncPayload(
             ReportRequest.make({
               since: "2026-11-20",

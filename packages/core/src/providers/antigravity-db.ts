@@ -205,6 +205,7 @@ export function walkProtoMessage(
 
       if (length > end - offset) throw new Error("Truncated Antigravity protobuf fixed field");
       offset += length;
+      onField({ number, wire });
     } else if (wire === 2) {
       const length = readVarint(reader, offset, end);
 
