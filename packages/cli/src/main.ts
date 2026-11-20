@@ -32,6 +32,7 @@ import { Command, Flag, Prompt } from "effect/cli";
 import { FetchHttpClient } from "effect/http";
 
 import metadata from "../package.json" with { type: "json" };
+import { antigravitySources, expandUserPath } from "./antigravity.ts";
 import { billingHintsDirectory, dataHome, tokenLedgerDataDirectory } from "./billing-hints.ts";
 
 import {
@@ -84,9 +85,9 @@ const systemTimeZone = Effect.sync(() => Intl.DateTimeFormat().resolvedOptions()
   ),
 );
 
-/** Resolves a path as typed in a shell: `~/` is the home directory, and the rest is relative to `base`. */
+/** Resolves a path as typed in a shell: `~`, `~/`, and `~\` expand to `home`, and the rest is relative to `base`. */
 const expandPath = (path: Path.Path, value: string, base = workingDirectory) =>
-  path.resolve(base, value.startsWith("~/") ? path.join(home, value.slice(2)) : value);
+  expandUserPath(path, home, value, base);
 
 /** Flags selecting usage, shared by `report` and `sync`. */
 function usageFlags(sinceDefault: string, strict: string) {
@@ -116,6 +117,7 @@ function usageFlags(sinceDefault: string, strict: string) {
       "copilot",
       "pi",
       "opencode",
+      "antigravity",
     ]).pipe(Flag.withDefault("all")),
     project: Flag.String("project").pipe(
       Flag.withSchema(ProjectName),
@@ -217,6 +219,14 @@ const usageRequest = Effect.fn("CLI.usageRequest")(function* (
     (value) => path.resolve(opencodeData, value),
   );
 
+  const antigravityDataDir = yield* Config.String("ANTIGRAVITY_DATA_DIR").pipe(Config.option);
+  const envT3Home = yield* Config.String("T3CODE_HOME").pipe(Config.option);
+
+  const needsAntigravityDefaults =
+    configuration.sources === undefined &&
+    Option.isNone(flags.source) &&
+    (flags.provider === "all" || flags.provider === "antigravity");
+
   const defaults: Source[] = [
     { provider: "codex", path: path.join(expand(codexHome), "sessions") },
     { provider: "codex", path: path.join(expand(codexHome), "archived_sessions") },
@@ -247,6 +257,11 @@ const usageRequest = Effect.fn("CLI.usageRequest")(function* (
           ? []
           : [{ provider: "opencode", path: file }],
     }),
+    ...(needsAntigravityDefaults
+      ? (yield* antigravitySources(home, antigravityDataDir, envT3Home, expand)).map(
+          (source): Source => ({ provider: "antigravity", path: source }),
+        )
+      : []),
   ];
 
   let sources: readonly Source[] =
@@ -263,7 +278,8 @@ const usageRequest = Effect.fn("CLI.usageRequest")(function* (
   if (Option.isSome(flags.source)) {
     if (flags.provider === "all")
       return yield* new CliError({
-        message: "--source requires --provider codex, claude, grok, copilot, pi, or opencode.",
+        message:
+          "--source requires --provider codex, claude, grok, copilot, pi, opencode, or antigravity.",
       });
     sources = [{ provider: flags.provider, path: expand(flags.source.value) }];
   }
@@ -780,6 +796,7 @@ const scheduleInstall = Command.make(
       "copilot",
       "pi",
       "opencode",
+      "antigravity",
     ]).pipe(Flag.withDefault("all")),
     dryRun: Flag.Boolean("dry-run").pipe(
       Flag.withDefault(false),

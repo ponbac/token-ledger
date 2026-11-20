@@ -15,6 +15,7 @@ import {
   addTokens,
   zeroTokens,
 } from "./model.ts";
+import { antigravityRateModel } from "./providers/antigravity.ts";
 
 const ratesUrl =
   "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
@@ -309,7 +310,7 @@ export const loadPrices = Effect.fn("Pricing.load")(function* (
  * such as payer routes, one-hour cache writes, and aggregated requests. A pricing basis names
  * the method that priced a run, so a bump marks earlier uploads for repricing.
  */
-const pricingMethod = 1;
+const pricingMethod = 2;
 
 function canonicalRates(rates: Rates) {
   return [rates.input, rates.output, rates.cacheRead, rates.cacheWrite, rates.cacheWrite1h ?? null];
@@ -393,7 +394,14 @@ function vendorLookup(book: PriceBook, model: string): ModelPrice | undefined {
   const hyphenated = bare.startsWith("claude-") ? bare.replace(/(\d)\.(?=\d)/g, "$1-") : bare;
 
   for (const name of new Set([model, bare, hyphenated])) {
-    for (const key of [name, `openai/${name}`, `anthropic/${name}`, `xai/${name}`]) {
+    for (const key of [
+      name,
+      `openai/${name}`,
+      `anthropic/${name}`,
+      `xai/${name}`,
+      `gemini/${name}`,
+      `vertex_ai/${name}`,
+    ]) {
       if (Object.hasOwn(book.prices, key)) return book.prices[key];
     }
   }
@@ -403,10 +411,19 @@ function vendorLookup(book: PriceBook, model: string): ModelPrice | undefined {
 
 /**
  * Copilot-paid records take GitHub Copilot's card, then LiteLLM's `github_copilot/` rates for a
- * model the card lacks, then the vendor's. Everything else takes the vendor's.
+ * model the card lacks, then the vendor's. Everything else takes the vendor's; Antigravity
+ * additionally falls back through its effort and routing aliases when exact lookup misses.
  */
 function resolve(record: UsageRecord, vendor: PriceBook): ModelPrice | undefined {
-  if (!copilotPaid(record)) return vendorLookup(vendor, record.model);
+  if (!copilotPaid(record)) {
+    const direct = vendorLookup(vendor, record.model);
+
+    if (direct !== undefined || record.provider !== "antigravity") return direct;
+    const alias = antigravityRateModel(record.model);
+
+    return alias === record.model ? undefined : vendorLookup(vendor, alias);
+  }
+
   const bare = withoutVariant(record.model);
   const fallback = `github_copilot/${bare}`;
 
