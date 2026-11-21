@@ -32,6 +32,8 @@ import {
 import { addUsage, priceRecord } from "./pricing.ts";
 import { type Attribution, projectResolver } from "./projects.ts";
 import type { RepositoryHistoryError } from "./repository-history.ts";
+import { AntigravityDatabaseError, readAntigravityDatabase } from "./providers/antigravity-db.ts";
+import { antigravityHistory, parseAntigravityDatabase } from "./providers/antigravity.ts";
 import { claudeParser } from "./providers/claude.ts";
 import { codexParser } from "./providers/codex.ts";
 import { copilotDatabaseLines, type CopilotDatabaseError } from "./providers/copilot-db.ts";
@@ -258,8 +260,11 @@ export class Ledger extends Context.Service<
         const copilotExcluded = new Set<string>();
         // OpenCode matches a fork's copies to originals in any of its databases and files.
         const opencode = opencodeHistory((value) => path.normalize(value));
+        // Antigravity learns numeric model IDs and merges aliases across roots before windowing.
+        const antigravity = antigravityHistory();
+        const sourceDuplicates: Array<() => void> = [];
 
-        for (const source of request.sources) {
+        for (const [sourceIndex, source] of request.sources.entries()) {
           let files = 0;
           let filesBeforeWindow = 0;
           let malformedLines = 0;
@@ -268,6 +273,10 @@ export class Ledger extends Context.Service<
           let failedFiles = 0;
           let missingRoot = false;
           const warnings = new Set<string>();
+
+          sourceDuplicates.push(() => {
+            duplicates++;
+          });
 
           const copilot =
             source.provider === "copilot" ? copilotParser(source.path, chatgptRequests) : undefined;
@@ -361,6 +370,42 @@ export class Ledger extends Context.Service<
             if (settled) {
               settledFiles.add(identity);
               filesBeforeWindow++;
+
+              return;
+            }
+
+            if (source.provider === "antigravity") {
+              const raw = yield* readAntigravityDatabase(canonical);
+
+              if (raw === null) {
+                if (source.path === file)
+                  return yield* new AntigravityDatabaseError({
+                    message: "The Antigravity database has no usage tables.",
+                  });
+
+                return;
+              }
+
+              visitedFiles.add(identity);
+
+              const fallbackTimestamp = Option.isSome(info.mtime) ? info.mtime.value.getTime() : 0;
+
+              const parsed = yield* Effect.try({
+                try: () =>
+                  parseAntigravityDatabase(
+                    path.basename(canonical, ".db"),
+                    fallbackTimestamp,
+                    raw,
+                    (value) => path.normalize(value),
+                  ),
+                catch: () =>
+                  new AntigravityDatabaseError({
+                    message: "Cannot decode the Antigravity database.",
+                  }),
+              });
+
+              files++;
+              antigravity.addDatabase(parsed, sourceIndex, source.project);
 
               return;
             }
@@ -461,16 +506,20 @@ export class Ledger extends Context.Service<
           if (hintsFailed)
             warnings.add("Billing hints could not be read; stored Copilot usage will be kept.");
 
-          // A directory holding no OpenCode history at all is not evidence of none.
+          // A directory holding no OpenCode or Antigravity history at all is not evidence of none.
           const unrecognised =
-            source.provider === "opencode" &&
+            (source.provider === "opencode" || source.provider === "antigravity") &&
             !missingRoot &&
             failedFiles === 0 &&
             files === 0 &&
             filesBeforeWindow === 0;
 
           if (unrecognised)
-            warnings.add("No OpenCode database or legacy message or session was found here.");
+            warnings.add(
+              source.provider === "antigravity"
+                ? "No Antigravity conversation database was found here."
+                : "No OpenCode database or legacy message or session was found here.",
+            );
 
           const status = hintsFailed
             ? "failed"
@@ -522,6 +571,21 @@ export class Ledger extends Context.Service<
         for (const legacy of deferred) yield* legacy;
 
         for (const copy of inherited) yield* copy;
+
+        for (const entry of antigravity.finish()) {
+          const slot = locate(entry.record.timestamp);
+
+          if (slot === undefined || totalTokens(entry.record.tokens) === 0) continue;
+
+          for (const duplicateSource of entry.duplicateSources)
+            sourceDuplicates[duplicateSource]?.();
+
+          const id = `${entry.record.provider}:${entry.record.id}`;
+
+          if (seen.has(id)) continue;
+          seen.add(id);
+          collect(entry.record, yield* projects.resolve(entry.record, entry.fixedProject), slot);
+        }
 
         yield* projects.flush();
 
@@ -743,6 +807,16 @@ function provenance(pricing: PriceBook) {
 }
 
 function acceptsFile(path: Path.Path, source: Source, file: string): boolean {
+  if (source.provider === "antigravity") {
+    const name = path.basename(file);
+
+    if (name === "conversation_summaries.db") return false;
+
+    if (source.path === file) return true;
+
+    return name.endsWith(".db");
+  }
+
   if (source.path === file) return true;
 
   if (source.provider === "grok")
@@ -796,11 +870,32 @@ const opencodeElsewhere = new Set([
   "tool-output",
 ]);
 
+/** Directories beside Antigravity's `conversations/` store that never hold conversation DBs. */
+const antigravityElsewhere = new Set([
+  "annotations",
+  "bin",
+  "brain",
+  "builtin",
+  "cache",
+  "crashes",
+  "global_skills",
+  "implicit",
+  "knowledge",
+  "log",
+  "mcp",
+  "persistent_terminals",
+  "presence",
+  "skills",
+  "updater",
+]);
+
 /** Whether a directory under a source can hold its history. */
 function descends(path: Path.Path, source: Source, directory: string): boolean {
   if (directory === source.path) return true;
 
   if (source.provider === "copilot") return !insideSession(directory);
+
+  if (source.provider === "antigravity") return !antigravityElsewhere.has(path.basename(directory));
 
   return source.provider !== "opencode" || !opencodeElsewhere.has(path.basename(directory));
 }
@@ -810,10 +905,11 @@ function descends(path: Path.Path, source: Source, directory: string): boolean {
  * no later usage. A file named as the source itself is always read. So is every Copilot export: a
  * request takes its repository and cache details from spans in other files, and a live SQLite
  * database keeps new rows in its write-ahead log without touching its own modification time,
- * as OpenCode's databases do. A Copilot session's event log stands alone and is only appended
- * to, so it settles like any other. OpenCode's legacy session files are small and always read,
- * since a fork's copies are known by when their session began; its message files are rewritten
- * only while their request runs.
+ * as OpenCode's and Antigravity's databases do. Antigravity databases are also always opened so
+ * cross-file model ID learning and cross-root deduplication see every conversation. A Copilot
+ * session's event log stands alone and is only appended to, so it settles like any other.
+ * OpenCode's legacy session files are small and always read, since a fork's copies are known by
+ * when their session began; its message files are rewritten only while their request runs.
  */
 function settledBefore(
   path: Path.Path,
@@ -824,6 +920,7 @@ function settledBefore(
 ): boolean {
   if (
     source.path === file ||
+    source.provider === "antigravity" ||
     (source.provider === "copilot" && !isSessionEvents(file)) ||
     (source.provider === "opencode" && opencodeFile(path, file) !== "message")
   )

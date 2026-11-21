@@ -102,6 +102,30 @@ const litellm = {
     cache_read_input_token_cost: 0.0000001,
     cache_creation_input_token_cost: 0.00000125,
   },
+  "gemini/gemini-4-neon": {
+    litellm_provider: "gemini",
+    input_cost_per_token: 0.000003,
+    output_cost_per_token: 0.000015,
+    cache_read_input_token_cost: 0.00000015,
+  },
+  "vertex_ai/gemini-4-vertex-only": {
+    litellm_provider: "vertex_ai-language-models",
+    input_cost_per_token: 0.000002,
+    output_cost_per_token: 0.00001,
+    cache_read_input_token_cost: 0.0000001,
+  },
+  "gemini/gemini-3.5-flash": {
+    litellm_provider: "gemini",
+    input_cost_per_token: 0.0000015,
+    output_cost_per_token: 0.000009,
+    cache_read_input_token_cost: 0.00000015,
+  },
+  "gemini/gemini-3-flash-preview": {
+    litellm_provider: "gemini",
+    input_cost_per_token: 0.0000005,
+    output_cost_per_token: 0.000003,
+    cache_read_input_token_cost: 0.00000005,
+  },
   "invalid-model": { input_cost_per_token: -1, output_cost_per_token: 1 },
   metadata: { description: "Not a model rate" },
 };
@@ -584,6 +608,87 @@ describe("Copilot-paid requests", () => {
         }),
       ),
   );
+  it.effect(
+    "resolves gemini/ and vertex_ai/ vendor rates and scopes Antigravity aliases to Antigravity",
+    () =>
+      withLitellm((book) =>
+        Effect.sync(() => {
+          const neon = priceRecord(
+            request("gemini-4-neon", tokens(1_000_000, 1_000_000, 0, 1_000_000), {
+              provider: "antigravity",
+            }),
+            book,
+          );
+
+          assert.closeTo(neon.usd ?? -1, 3 + 0.15 + 15, 1e-12);
+
+          // Missing cacheWrite stays unknown when cache-write tokens are actually present.
+          assert.isNull(
+            priceRecord(
+              request("gemini-4-neon", tokens(1_000, 0, 10, 1_000), { provider: "antigravity" }),
+              book,
+            ).usd,
+          );
+
+          // vertex_ai/ fallback works for bare Gemini models on any non-Copilot provider.
+          const vertexOnly = priceRecord(
+            request("gemini-4-vertex-only", tokens(1_000_000, 0, 0, 1_000_000), {
+              provider: "opencode",
+            }),
+            book,
+          );
+
+          assert.closeTo(vertexOnly.usd ?? -1, 2 + 10, 1e-12);
+
+          // Effort suffix and routing aliases apply only to Antigravity; gemini-3-flash-agent
+          // matches gemini-3.5-flash ($9/M out) before generic `-agent` removal ($3/M out).
+          const neonHigh = priceRecord(
+            request("gemini-4-neon-high", tokens(0, 0, 0, 1_000_000), {
+              provider: "antigravity",
+            }),
+            book,
+          );
+
+          assert.closeTo(neonHigh.usd ?? -1, 15, 1e-12);
+
+          const flashAgent = priceRecord(
+            request("gemini-3-flash-agent", tokens(0, 0, 0, 1_000_000), {
+              provider: "antigravity",
+            }),
+            book,
+          );
+
+          assert.closeTo(flashAgent.usd ?? -1, 9, 1e-12);
+
+          const flashBase = priceRecord(
+            request("gemini-3-flash", tokens(0, 0, 0, 1_000_000), {
+              provider: "antigravity",
+            }),
+            book,
+          );
+
+          assert.closeTo(flashBase.usd ?? -1, 3, 1e-12);
+
+          // Other tools' private aliases are not guessed through Antigravity routing rules.
+          assert.isNull(
+            priceRecord(
+              request("gemini-3-flash-agent", tokens(0, 0, 0, 1_000_000), {
+                provider: "opencode",
+              }),
+              book,
+            ).usd,
+          );
+          assert.isNull(
+            priceRecord(
+              request("gemini-4-neon-high", tokens(0, 0, 0, 1_000_000), {
+                provider: "opencode",
+              }),
+              book,
+            ).usd,
+          );
+        }),
+      ),
+  );
 });
 
 describe("pricing basis", () => {
@@ -611,6 +716,7 @@ describe("pricing basis", () => {
   it("names the method, rate card, and overrides, and nothing that changes between fetches", () => {
     const basis = configuredPricing(vendor, undefined).basis;
     assert.isTrue(Schema.is(PricingBasis)(basis));
+    assert.include(basis, "token-ledger-pricing@2;");
     assert.include(basis, `copilot-rates@${copilotRates.version}`);
 
     const later = configuredPricing(

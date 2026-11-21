@@ -106,14 +106,32 @@ node packages/cli/dist/main.js report
 | Copilot CLI / VS Code Chat | `~/.copilot/otel` or `COPILOT_OTEL_FILE_EXPORTER_PATH`  | JSONL request spans, VS Code inference events, and SQLite span exports          |
 | Pi                         | `~/.pi/agent/sessions` or `PI_CODING_AGENT_SESSION_DIR` | Assistant messages on every branch, plus usage, compaction, and summary entries |
 | OpenCode                   | `~/.local/share/opencode`                               | Assistant messages in `opencode*.db` and legacy `storage/message` files         |
+| Antigravity                | `~/.gemini/antigravity*` and T3 Code ACP profiles       | Conversation SQLite usage metadata, retries, and Git workspace attribution      |
 
-`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `GROK_HOME`, `COPILOT_HOME`, and `PI_CODING_AGENT_DIR`
-override the usual homes. OpenCode keeps its data under `$XDG_DATA_HOME/opencode` on every
+`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `GROK_HOME`, `COPILOT_HOME`, `PI_CODING_AGENT_DIR`,
+`ANTIGRAVITY_DATA_DIR`, and `T3CODE_HOME` override the usual homes. OpenCode keeps its data under `$XDG_DATA_HOME/opencode` on every
 platform, Windows and macOS included, so an absolute `XDG_DATA_HOME` moves it, and
 `OPENCODE_DB` names a database file in place of `opencode.db`, relative to that directory.
 Configuration supports additional accounts, machines' exported histories,
 and arbitrary source directories. Histories are opened read-only, including work
 performed outside T3 Code.
+
+### Antigravity
+
+Token Ledger opens Antigravity conversation SQLite databases (`conversations/*.db`) read-only,
+stages each row inside SQLite's in-memory temporary storage, and returns only bounded protobuf
+usage, model, and workspace metadata slices to JavaScript — prompt and response bytes never cross
+from SQLite into the collector or leave the machine. Default discovery scans `~/.gemini/antigravity*`,
+`~/.config/antigravity`, and T3 Code's managed ACP profiles under
+`${T3CODE_HOME:-~/.t3}/{userdata,dev}/providers/antigravity/*/antigravity-acp`. Set
+`ANTIGRAVITY_DATA_DIR` (comma-separated paths) to override the standalone roots.
+
+Existing machines that already synced to Toki normally upload a 14-day window; to backfill earlier
+Antigravity history or cover the start of a billing month after upgrading, run:
+
+```sh
+token-ledger sync --provider antigravity --since YYYY-MM-DD
+```
 
 ### OpenCode
 
@@ -962,7 +980,7 @@ For manual publication:
 1. Log in with `npm login` using an account with publish access to `@ponbac/token-ledger`.
 2. Run `bun run check`. The CLI test packs the package, installs it offline outside
    the repository with lifecycle scripts disabled, and exercises the installed CLI.
-3. Run `bun run pack` to create `dist/ponbac-token-ledger-0.11.2.tgz` (filename follows version).
+3. Run `bun run pack` to create `dist/ponbac-token-ledger-0.12.0.tgz` (filename follows version).
 4. Inspect `npm publish ./dist/npm --dry-run`.
 5. Publish with `npm publish ./dist/npm --access public`; complete npm's authentication
    prompt if requested.

@@ -6,8 +6,8 @@ The contract between `token-ledger sync` and the toki2 ingest endpoint, and its
 explains them. Figures are API-equivalent estimates, not bills.
 
 Version 2 adds an optional `billingProvider` to each bucket. It names a different
-subscription provider (`codex`, `claude`, `grok`, or `copilot`); Pi and OpenCode cannot
-be payers.
+subscription provider (`codex`, `claude`, `grok`, `copilot`, or `antigravity`); Pi and OpenCode
+cannot be payers.
 The source `provider` remains unchanged. The bucket key additionally includes
 `billingProvider` (absent means native routing), allowing different payers in the
 same hour, session, project and model. Coverage and replacement still use the source
@@ -20,6 +20,12 @@ exactly zero, which OpenCode's ChatGPT sign-in produces by clearing every OpenAI
 rates. Other OpenCode routes carry no override. toki2 must accept the `opencode` provider
 before a release containing it is published: an older server rejects the whole payload as
 invalid, for every provider in it.
+
+Antigravity (`antigravity`) reads local Antigravity CLI and T3 Code ACP conversation SQLite
+databases, supports declared subscriptions in toki2, and reports no plan hints. As with OpenCode,
+deploy toki2 support for `antigravity` before publishing a release containing it. Existing machines
+upgrading mid-month can backfill earlier Antigravity usage with
+`token-ledger sync --provider antigravity --since YYYY-MM-DD`.
 
 Version 3 keeps the priced subtotal of a bucket that mixes priced and unpriced records,
 which happens when a priced model's rates lack a token kind a record used, such as cache
@@ -146,6 +152,7 @@ declared subscriptions, which remain authoritative; a missing hint proves nothin
 | Grok Build  | Not investigated yet.                                                                                                                                                                                |
 | Pi          | `openai-codex` when usage ran through Pi's ChatGPT sign-in, a route with no API-key form. Pi records the route, not the plan, and no other route is sent: `anthropic`, for one, also takes API keys. |
 | OpenCode    | None: OpenCode records no plan. Its routes become bucket `billingProvider` overrides instead (above).                                                                                                |
+| Antigravity | None: conversation databases do not record Google AI Pro/Ultra subscription tiers.                                                                                                                   |
 
 ## Project keys
 
@@ -180,7 +187,7 @@ or legacy OpenCode message file last modified more than 36 hours before `window.
 `files` and the diagnostic counts describe the files opened, and `filesBeforeWindow`
 counts the rest. A provider
 whose history all predates the window is therefore `ok` with `files` 0, and its stored
-buckets in the window are replaced with none. Copilot exports and OpenCode databases are
+buckets in the window are replaced with none. Copilot exports, OpenCode databases, and Antigravity conversation databases are
 always opened.
 `filesBeforeWindow` is optional: the first version 1 clients omit it, and a server may ignore it.
 
